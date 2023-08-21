@@ -2636,6 +2636,11 @@ checkLPVMArgs "mutate" _ [old,new,offset,destr,sz,start,val] stmt pos = do
                       (integerTypeRep start)
 checkLPVMArgs "mutate" _ args stmt pos =
     typeError (ReasonForeignArity "mutate" (length args) 7 pos)
+checkLPVMArgs "unsafe_mutate" _ [addr,offset,val] stmt pos = do
+    reportErrorUnless (ReasonForeignArgRep "unsafe_mutate" 1 addr "address" pos)
+                      (addr == Address)
+    reportErrorUnless (ReasonForeignArgRep "unsafe_mutate" 2 offset "integer" pos)
+                      (integerTypeRep offset)
 -- XXX do we still need a cast instruction?
 checkLPVMArgs "cast" _ [old,new] stmt pos = return ()
 checkLPVMArgs "cast" _ [] stmt pos = return ()

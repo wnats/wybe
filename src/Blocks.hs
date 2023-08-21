@@ -813,6 +813,14 @@ cgenLPVM "mutate" _
 cgenLPVM "mutate" _ [_, _, _, destructiveArg, _, _, _] =
       nyi "lpvm mutate instruction with non-constant destructive flag"
 
+cgenLPVM "unsafe_mutate" _ [addrArg, offsetArg, valArg]
+    | argFlowDirection valArg == FlowIn = do
+        logCodegen $ "lpvm unsafe_mutate" ++ show addrArg
+                     ++ " " ++ show offsetArg
+                     ++ " " ++ show valArg
+        baseAddr <- cgenArg addrArg
+        gcMutate baseAddr offsetArg valArg
+
 cgenLPVM "cast" _ args@[inArg,outArg] =
     case partitionArgs args of
         ([inArg],[outArg]) -> do
