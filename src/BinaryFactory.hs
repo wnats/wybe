@@ -82,6 +82,12 @@ instance Binary Item
 instance Binary TypeProto
 instance Binary TypeModifiers
 instance Binary TypeImpln
+
+-- Entity
+instance Binary EntityProto
+instance Binary EntityAttr
+instance Binary EntityAttrModifier
+
 -- * Manual Serialisation
 
 instance Binary EncodedLPVM

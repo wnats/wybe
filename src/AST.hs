@@ -30,6 +30,7 @@ module AST (
   paramTypeFlow, primParamTypeFlow, setParamArgFlowType,
   paramToVar, primParamToArg, unzipTypeFlow, unzipTypeFlows,
   PrimProto(..), PrimParam(..), ParamInfo(..),
+  EntityProto(..), EntityAttr(..), EntityAttrModifier(..),
   Exp(..), StringVariant(..), GlobalInfo(..), Generator(..), Stmt(..), ProcFunctor(..),
   regularProc, regularModProc,
   flattenedExpFlow, expIsVar, expIsConstant, expVar, expVar', maybeExpType, innerExp,
@@ -179,6 +180,7 @@ data Item
        -- The Bool in the next two indicates whether inlining is forced
      | FuncDecl Visibility ProcModifiers ProcProto TypeSpec (Placed Exp) OptPos
      | ProcDecl Visibility ProcModifiers ProcProto [Placed Stmt] OptPos
+     | EntityDecl Visibility EntityProto
      | StmtDecl Stmt OptPos
      | PragmaDecl Pragma
      deriving (Generic, Eq)
@@ -2725,6 +2727,23 @@ instance Show PrimProto where
         name ++ "(" ++ intercalate ", " (List.map show params) ++ ")"
              ++ show gFlows
 
+data EntityProto = EntityProto {
+    entityProtoName :: EntityProtoName,
+    entityProtoAttributes :: [EntityAttr]
+} deriving (Generic, Show, Eq)
+
+type EntityProtoName = Ident
+
+data EntityAttr = EntityAttr {
+    entityAttrName :: EntityAttrName,
+    entityAttrType :: TypeSpec,
+    entityAttrModifier :: EntityAttrModifier
+} deriving (Generic, Show, Eq)
+
+type EntityAttrName = Ident
+
+-- | Can add more modifier in the future (e.g. Optional)
+data EntityAttrModifier = Key | Index deriving (Show, Generic, Eq)
 
 -- |A formal parameter, including name, type, and flow direction.
 data Param = Param {
@@ -3717,6 +3736,9 @@ instance Show Item where
     ++ " {"
     ++ showBody 4 stmts
     ++ "\n  }"
+  show (EntityDecl vis entityProto) =
+    visibilityPrefix vis
+    ++ show entityProto
   show (StmtDecl stmt pos) =
     showStmt 4 stmt ++ showOptPos pos
   show (PragmaDecl prag) =
