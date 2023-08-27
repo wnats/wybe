@@ -86,6 +86,7 @@ visibilityItem = do
         <|> resourceItem v
         <|> useItemParser v
         <|> fromUseItemParser v
+        <|> entityItemParser v
     <?> "top-level item"
 
 
@@ -274,6 +275,12 @@ flowDirection :: Parser FlowDirection
 flowDirection =
     option ParamIn $ symbol "?" $> ParamOut <|> symbol "!" $> ParamInOut
 
+-- | Parse an entity declaration
+entityItemParser :: Visibility -> Parser Item
+entityItemParser v = do
+    pos <- tokenPosition <$> ident "entity"
+    entityProto <- term >>= parseWith termToEntityProto
+    return $ EntityDecl v entityProto $ Just pos
 
 -----------------------------------------------------------------------------
 -- Handling type modifiers                                                 --
@@ -1338,6 +1345,24 @@ termToResourceList (Call _ mod name ParamIn []) =
     return [ResourceSpec mod name]
 termToResourceList other =
     syntaxError (termPos other) "expected resource spec"
+
+-- | Translate a Term to an entity prototype
+termToEntityProto :: TranslateTo EntityProto
+termToEntityProto (Call _ [] name ParamIn attrs) = do
+    attrs' <- mapM termToEntityAttr attrs
+    return $ EntityProto name attrs'
+termToEntityProto other =
+    syntaxError (termPos other)
+        $ "invalid entity declaration " ++ show other
+
+-- | Translate a Term to an entity attribute
+termToEntityAttr :: TranslateTo (Placed EntityAttr)
+termToEntityAttr (Call pos [] ":" ParamIn [Call _ [] name ParamIn [], ty]) = do
+    ty' <- termToTypeSpec ty
+    return $ EntityAttr name ty' Nothing `maybePlace` Just pos
+termToEntityAttr other =
+    syntaxError (termPos other)
+        $ "invalid entity attribute " ++ show other
 
 -----------------------------------------------------------------------------
 -- Data structures                                                         --
