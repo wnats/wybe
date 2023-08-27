@@ -180,7 +180,7 @@ data Item
        -- The Bool in the next two indicates whether inlining is forced
      | FuncDecl Visibility ProcModifiers ProcProto TypeSpec (Placed Exp) OptPos
      | ProcDecl Visibility ProcModifiers ProcProto [Placed Stmt] OptPos
-     | EntityDecl Visibility EntityProto
+     | EntityDecl Visibility EntityProto OptPos
      | StmtDecl Stmt OptPos
      | PragmaDecl Pragma
      deriving (Generic, Eq)
@@ -2727,22 +2727,25 @@ instance Show PrimProto where
         name ++ "(" ++ intercalate ", " (List.map show params) ++ ")"
              ++ show gFlows
 
+-- | An entity prototype
 data EntityProto = EntityProto {
     entityProtoName :: EntityProtoName,
-    entityProtoAttributes :: [EntityAttr]
-} deriving (Generic, Show, Eq)
+    entityProtoAttrs :: [Placed EntityAttr]
+} deriving (Generic, Eq)
 
 type EntityProtoName = Ident
 
+-- | An entity attribute
 data EntityAttr = EntityAttr {
     entityAttrName :: EntityAttrName,
     entityAttrType :: TypeSpec,
-    entityAttrModifier :: EntityAttrModifier
-} deriving (Generic, Show, Eq)
+    entityAttrModifier :: Maybe EntityAttrModifier
+} deriving (Generic, Eq)
 
 type EntityAttrName = Ident
 
--- | Can add more modifier in the future (e.g. Optional)
+-- | An entity attribute modifier (is the attribute a key or index?)
+--   Can add more modifiers in the future
 data EntityAttrModifier = Key | Index deriving (Show, Generic, Eq)
 
 -- |A formal parameter, including name, type, and flow direction.
@@ -3736,9 +3739,10 @@ instance Show Item where
     ++ " {"
     ++ showBody 4 stmts
     ++ "\n  }"
-  show (EntityDecl vis entityProto) =
+  show (EntityDecl vis entityProto pos) =
     visibilityPrefix vis
     ++ show entityProto
+    ++ showOptPos pos
   show (StmtDecl stmt pos) =
     showStmt 4 stmt ++ showOptPos pos
   show (PragmaDecl prag) =
@@ -3923,6 +3927,16 @@ instance Show PrimParam where
           flowStr = if flows == emptyGlobalFlows then "" else " " ++ show flows
       in  pre ++ show ft ++ primFlowPrefix dir ++ show name
           ++ showTypeSuffix typ Nothing ++ flowStr ++ post
+
+instance Show EntityProto where
+    show (EntityProto name attrs) =
+        name ++ "(" ++ intercalate ", " (List.map show attrs) ++ ")"
+
+instance Show EntityAttr where
+    show (EntityAttr name typ (Just modifier)) =
+        name ++ showTypeSuffix typ Nothing ++ "{" ++ show modifier ++ "}"
+    show (EntityAttr name typ Nothing) =
+        name ++ showTypeSuffix typ Nothing
 
 
 -- |Show the type of an expression, if it's known.

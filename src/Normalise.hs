@@ -111,7 +111,7 @@ normaliseItem item@ProcDecl{} = do
     (item',tmpCtr) <- flattenProcDecl item
     logNormalise $ "Normalised proc:" ++ show item'
     addProc tmpCtr item'
-normaliseItem (EntityDecl _ _) = do
+normaliseItem EntityDecl{} = do
     nyi "Entity Declaration coming soon!!"
 normaliseItem (StmtDecl stmt pos) = do
     logNormalise $ "Normalising statement decl " ++ show stmt
