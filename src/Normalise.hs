@@ -259,6 +259,11 @@ resolveParamType param@Param{paramType=ty} pos = do
     ty' <- lookupType "constructor parameter" pos ty
     return $ param { paramType = ty' } `maybePlace` pos
 
+-- | Resolve the type of an entity attribute
+resolveAttrType :: EntityAttr -> OptPos -> Compiler (Placed EntityAttr)
+resolveAttrType attr@EntityAttr{entityAttrType=ty} pos = do
+    ty' <- lookupType "entity attribute" pos ty
+    return $ attr { entityAttrType = ty' } `maybePlace` pos
 
 
 -- | Layout the types defined in the specified type dependency SCC, and then
@@ -295,6 +300,20 @@ data CtorParamInfo = CtorParamInfo {
     paramInfoAnon :: Bool,
     paramInfoTypeRep :: TypeRepresentation,
     paramInfoBitSize :: Int
+} deriving (Show)
+
+data EntityInfo = EntityInfo {
+    entityInfoName :: ProcName,
+    entityInfoAttrs :: [EntityAttrInfo],
+    entityInfoVis :: Visibility,
+    entityInfoPos :: OptPos,
+    entityInfoBits :: Int
+} deriving (Show)
+
+data EntityAttrInfo = EntityAttrInfo {
+    attrInfoAttr :: Placed EntityAttr,
+    attrInfoTypeRep :: TypeRepresentation,
+    attrInfoBitSize :: Int
 } deriving (Show)
 
 
@@ -412,8 +431,23 @@ nonConstCtorInfo (vis, placedProto) tag = do
     return (maybePlace proto{procProtoParams=params'} pos,
             CtorInfo name paramInfos vis pos tag bitSize)
 
--- TODO:
--- entityDefInfo :: (Visibility, Placed EntityProto) -> Compiler (Placed EntityProto, )
+-- | Analyse the representation of an entity, determining the representation
+--   and bit sizes of its members, and the sum of those bit sizes.
+entityDefInfo :: (Visibility, Placed EntityProto) -> Compiler EntityInfo
+entityDefInfo (vis, placedProto) = do
+    logNormalise $ "Analysing entity prototype: " ++ show placedProto
+    let (proto,pos) = unPlace placedProto
+    let name = entityProtoName proto
+    let attrs = entityProtoAttrs proto
+
+    reps <- mapM (placedApply resolveAttrType >=> lookupTypeRepresentation . entityAttrType . content) attrs
+    let reps' = catMaybes reps
+    logNormalise $ "Attribute representations: " ++ intercalate ", " (show <$> reps')
+    
+    let bitSizes = typeRepSize <$> reps'
+    let bitSize = sum bitSizes
+    let attrInfos = zipWith3 EntityAttrInfo attrs reps' bitSizes
+    return $ EntityInfo name attrInfos vis pos bitSize
 
 -- | Replace a field's name with an appropriate replacement if it is anonymous
 -- (empty string). Bool indicates if the name was replaced
