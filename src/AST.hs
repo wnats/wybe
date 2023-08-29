@@ -87,7 +87,7 @@ module AST (
   CompilerState(..), Compiler, runCompiler,
   updateModules, updateImplementations, updateImplementation,
   updateTypeModifiers,
-  addParameters, addTypeRep, setTypeRep, addConstructor,
+  addParameters, addTypeRep, setTypeRep, addConstructor, addEntity,
   getModuleImplementationField, getModuleImplementation,
   getLoadedModule, getLoadingModule, updateLoadedModule, updateLoadedModuleM,
   getLoadedModuleImpln, updateLoadedModuleImpln, updateLoadedModuleImplnM,
@@ -180,7 +180,7 @@ data Item
        -- The Bool in the next two indicates whether inlining is forced
      | FuncDecl Visibility ProcModifiers ProcProto TypeSpec (Placed Exp) OptPos
      | ProcDecl Visibility ProcModifiers ProcProto [Placed Stmt] OptPos
-     | EntityDecl Visibility EntityProto OptPos
+     | EntityDecl Visibility (Placed EntityProto) OptPos
      | StmtDecl Stmt OptPos
      | PragmaDecl Pragma
      deriving (Generic, Eq)
@@ -905,6 +905,24 @@ addConstructor vis pctor = do
     updateModule (\m -> m { modIsType  = True })
     addKnownType currMod
 
+addEntity :: Placed EntityProto -> Compiler ()
+addEntity placedEntityProto = do
+    let pos = place placedEntityProto
+    let entityProto = content placedEntityProto
+    currMod <- getModuleSpec
+    hasRepn <- isJust <$> getModule modTypeRep
+    when hasRepn
+      $ errmsg pos
+           $ "Declaring entity for type " ++ showModSpec currMod
+           ++ " with declared representation"
+    ctors <- fromMaybe [] <$> getModuleImplementationField modConstructors
+    unless (List.null ctors)
+      $  errmsg pos
+           $ "Declaring entity for type " ++ showModSpec currMod
+           ++ " with declared constructor(s)"
+    updateImplementation (\m -> m { modEntityDecl = Just placedEntityProto })
+    updateModule (\m -> m { modIsType = True })
+    addKnownType currMod
 
 -- |Record that the specified type is known in the current module.
 addKnownType :: ModSpec -> Compiler ()
@@ -1577,6 +1595,7 @@ data ModuleImplementation = ModuleImplementation {
                                               -- ^reversed list of data
                                               -- constructors for this
                                               -- type, if it is a type
+    modEntityDecl :: Maybe (Placed EntityProto),
     modKnownTypes:: Map Ident (Set ModSpec),  -- ^Types visible to this module
     modKnownResources :: Map Ident (Set ResourceSpec),
                                               -- ^Resources visible to this mod
@@ -1589,7 +1608,7 @@ data ModuleImplementation = ModuleImplementation {
 emptyImplementation :: ModuleImplementation
 emptyImplementation =
     ModuleImplementation Set.empty Map.empty Nothing Map.empty Map.empty
-                         Map.empty Nothing Map.empty Map.empty Map.empty
+                         Map.empty Nothing Nothing Map.empty Map.empty Map.empty
                          Set.empty Set.empty Nothing
 
 
@@ -2739,7 +2758,7 @@ type EntityProtoName = Ident
 data EntityAttr = EntityAttr {
     entityAttrName :: EntityAttrName,
     entityAttrType :: TypeSpec,
-    entityAttrModifier :: Maybe EntityAttrModifier
+    entityAttrModifier :: Set.Set EntityAttrModifier
 } deriving (Generic, Eq)
 
 type EntityAttrName = Ident
@@ -3933,11 +3952,12 @@ instance Show EntityProto where
         name ++ "(" ++ intercalate ", " (List.map show attrs) ++ ")"
 
 instance Show EntityAttr where
-    show (EntityAttr name typ (Just modifier)) =
-        name ++ showTypeSuffix typ Nothing ++ "{" ++ show modifier ++ "}"
-    show (EntityAttr name typ Nothing) =
-        name ++ showTypeSuffix typ Nothing
-
+    show (EntityAttr name typ modifiers) =
+        name ++ showTypeSuffix typ Nothing ++ maybeModifiers
+            where
+                maybeModifiers
+                    | Set.null modifiers = ""
+                    | otherwise          = "{" ++ show modifiers ++ "}"
 
 -- |Show the type of an expression, if it's known.
 showTypeSuffix :: TypeSpec -> Maybe TypeSpec -> String

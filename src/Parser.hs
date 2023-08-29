@@ -1347,10 +1347,10 @@ termToResourceList other =
     syntaxError (termPos other) "expected resource spec"
 
 -- | Translate a Term to an entity prototype
-termToEntityProto :: TranslateTo EntityProto
-termToEntityProto (Call _ [] name ParamIn attrs) = do
+termToEntityProto :: TranslateTo (Placed EntityProto)
+termToEntityProto (Call pos [] name ParamIn attrs) = do
     attrs' <- mapM termToEntityAttr attrs
-    return $ EntityProto name attrs'
+    return $ EntityProto name attrs' `maybePlace` Just pos
 termToEntityProto other =
     syntaxError (termPos other)
         $ "invalid entity declaration " ++ show other
@@ -1359,7 +1359,7 @@ termToEntityProto other =
 termToEntityAttr :: TranslateTo (Placed EntityAttr)
 termToEntityAttr (Call pos [] ":" ParamIn [Call _ [] name ParamIn [], ty]) = do
     ty' <- termToTypeSpec ty
-    return $ EntityAttr name ty' Nothing `maybePlace` Just pos
+    return $ EntityAttr name ty' Set.empty `maybePlace` Just pos
 termToEntityAttr other =
     syntaxError (termPos other)
         $ "invalid entity attribute " ++ show other

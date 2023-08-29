@@ -111,8 +111,8 @@ normaliseItem item@ProcDecl{} = do
     (item',tmpCtr) <- flattenProcDecl item
     logNormalise $ "Normalised proc:" ++ show item'
     addProc tmpCtr item'
-normaliseItem EntityDecl{} = do
-    nyi "Entity Declaration coming soon!!"
+normaliseItem (EntityDecl _ placedEntityProto _) = do
+    addEntity placedEntityProto
 normaliseItem (StmtDecl stmt pos) = do
     logNormalise $ "Normalising statement decl " ++ show stmt
     updateModule (\s -> s { stmtDecls = maybePlace stmt pos : stmtDecls s})
@@ -198,11 +198,14 @@ completeTypeNormalisation mods = do
 
 
 -- |An algebraic type definition, listing all the constructors.
-data TypeDef = TypeDef {
+data TypeDef = CtorDef {
     typeDefParams :: [TypeVarName],           -- the type parameters
     typeDefMembers :: [(Visibility, Placed ProcProto)]
                                               -- high level representation, 
                                               -- with visibilities
+    }
+    | EntityDef {
+        entityDefMember :: (Visibility, Placed EntityProto)
     } deriving (Eq, Show)
 
 
@@ -240,7 +243,7 @@ modTypeDeps modSet = do
                  (catMaybes . (typeModule . paramType . content <$>)
                   . procProtoParams . content)
                  ctors
-    return ((tyMod, TypeDef tyParams ctorsVis), tyMod, deps)
+    return ((tyMod, CtorDef tyParams ctorsVis), tyMod, deps)
 
 
 -- | Resolve constructor argument types.
@@ -317,9 +320,9 @@ data CtorParamInfo = CtorParamInfo {
 --          rep = integer with max ctorSize bits
 --     * else: rep = integer with wordSizeBytes bits
 completeType :: ModSpec -> TypeDef -> Compiler ()
-completeType modspec (TypeDef params []) =
+completeType modspec (CtorDef params []) =
     shouldnt $ "completeType with no constructors: " ++ show modspec
-completeType modspec (TypeDef params ctors) = do
+completeType modspec (CtorDef params ctors) = do
     logNormalise $ "Completing type " ++ showModSpec modspec
     reenterModule modspec
 
@@ -372,6 +375,12 @@ completeType modspec (TypeDef params ctors) = do
     normalise $ constItems ++ concat nonconstItemsList ++ extraItems ++ getSetItems
 
     reexitModule
+completeType modspec (EntityDef (vis, entityProto)) = do
+    logNormalise $ "Completing type " ++ showModSpec modspec
+    reenterModule modspec
+    -- let typespec = TypeSpec [] currentModuleAlias []
+    
+    reexitModule
 
 
 -- | Analyse the representation of a single constructor, determining the
@@ -403,6 +412,8 @@ nonConstCtorInfo (vis, placedProto) tag = do
     return (maybePlace proto{procProtoParams=params'} pos,
             CtorInfo name paramInfos vis pos tag bitSize)
 
+-- TODO:
+-- entityDefInfo :: (Visibility, Placed EntityProto) -> Compiler (Placed EntityProto, )
 
 -- | Replace a field's name with an appropriate replacement if it is anonymous
 -- (empty string). Bool indicates if the name was replaced
