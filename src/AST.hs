@@ -2765,7 +2765,7 @@ type EntityAttrName = Ident
 
 -- | An entity attribute modifier (is the attribute a key or index?)
 --   Can add more modifiers in the future
-data EntityAttrModifier = Key | Index deriving (Show, Generic, Eq)
+data EntityAttrModifier = Key | Index deriving (Show, Generic, Ord, Eq)
 
 -- |A formal parameter, including name, type, and flow direction.
 data Param = Param {

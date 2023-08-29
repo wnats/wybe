@@ -13,6 +13,9 @@ module Parser where
 import AST hiding (option)
 import Data.Set as Set
 import Data.List as List
+import Data.Map as Map
+import Data.Function
+import Data.Bifunctor as Bifunctor
 import Data.Maybe as Maybe
 import Data.Bits
 import Data.Either.Extra (mapLeft)
@@ -280,7 +283,13 @@ entityItemParser :: Visibility -> Parser Item
 entityItemParser v = do
     pos <- tokenPosition <$> ident "entity"
     entityProto <- term >>= parseWith termToEntityProto
-    return $ EntityDecl v entityProto $ Just pos
+    entityModifiers <- embracedTerm >>= parseWith termToEntityModifiers
+    let entityModifiers_  = List.map (Bifunctor.second Set.singleton) entityModifiers
+    let attrModifierMap = Map.fromListWith Set.union entityModifiers_
+    let placedAttrs = entityProtoAttrs $ content entityProto
+    let entityAttrsUpdated = List.map (contentApply (\attr -> attr { entityAttrModifier = fromMaybe Set.empty (Map.lookup (entityAttrName attr) attrModifierMap) })) placedAttrs
+    let entityProtoUpdated = contentApply (\proto -> proto { entityProtoAttrs = entityAttrsUpdated }) entityProto
+    return $ EntityDecl v entityProtoUpdated $ Just pos
 
 -----------------------------------------------------------------------------
 -- Handling type modifiers                                                 --
@@ -1000,6 +1009,25 @@ termToBody (Embraced pos Brace [body] Nothing) =
     termToBody body
 termToBody other = (:[]) <$> termToStmt other
 
+-- | Convert a Term to a list of (attribute, modifier) tuples
+termToEntityModifiers :: TranslateTo [(Ident, EntityAttrModifier)]
+termToEntityModifiers (Embraced pos Brace modifierSpecs Nothing) =
+    mapM termToEntityModifier modifierSpecs
+termToEntityModifiers _ =
+    shouldnt "Entity modifier specifications should be wrapped in braces"
+
+-- | Convert a Term to an (attribute, modifier) tuple
+termToEntityModifier :: TranslateTo (Ident, EntityAttrModifier)
+termToEntityModifier (Call pos [] "::" ParamIn [attrTerm, modifierTerm]) =
+    case modifier of
+        "key" -> return (attr, Key)
+        "index" -> return (attr, Index)
+        other -> syntaxError pos "invalid modifier"
+    where
+        attr = callName attrTerm
+        modifier = callName modifierTerm
+termToEntityModifier _ =
+    shouldnt "Invalid syntax for parsing an entity modifier"
 
 -- |Convert a Term to a Stmt, if possible, or give a syntax error if not.
 termToStmt :: TranslateTo (Placed Stmt)
