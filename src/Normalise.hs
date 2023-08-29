@@ -111,8 +111,8 @@ normaliseItem item@ProcDecl{} = do
     (item',tmpCtr) <- flattenProcDecl item
     logNormalise $ "Normalised proc:" ++ show item'
     addProc tmpCtr item'
-normaliseItem (EntityDecl _ placedEntityProto _) = do
-    addEntity placedEntityProto
+normaliseItem (EntityDecl vis placedEntityProto _) = do
+    addEntity vis placedEntityProto
 normaliseItem (StmtDecl stmt pos) = do
     logNormalise $ "Normalising statement decl " ++ show stmt
     updateModule (\s -> s { stmtDecls = maybePlace stmt pos : stmtDecls s})
@@ -234,17 +234,28 @@ modSCCTypeDeps sccMods =
 modTypeDeps :: Set ModSpec -> Compiler ((ModSpec,TypeDef), ModSpec, [ModSpec])
 modTypeDeps modSet = do
     tyMod <- getModule modSpec
-    tyParams <- getModule modParams
-    ctorsVis <- reverse . trustFromJust "modTypeDeps"
-               <$> getModuleImplementationField modConstructors
-    ctors <- mapM (placedApply resolveCtorTypes . snd) ctorsVis
-    let deps = List.filter (`Set.member` modSet)
-               $ concatMap
-                 (catMaybes . (typeModule . paramType . content <$>)
-                  . procProtoParams . content)
-                 ctors
-    return ((tyMod, CtorDef tyParams ctorsVis), tyMod, deps)
-
+    maybeCtorsVis <- getModuleImplementationField modConstructors
+    if isJust maybeCtorsVis
+    then do
+        tyParams <- getModule modParams
+        let ctorsVis = reverse $ trustFromJust "modTypeDeps" maybeCtorsVis
+        ctors <- mapM (placedApply resolveCtorTypes . snd) ctorsVis
+        let deps = List.filter (`Set.member` modSet)
+                $ concatMap
+                    (catMaybes . (typeModule . paramType . content <$>)
+                    . procProtoParams . content)
+                    ctors
+        return ((tyMod, CtorDef tyParams ctorsVis), tyMod, deps)
+    else do
+        tyMod <- getModule modSpec
+        entityVis <- trustFromJust "modTypeDeps'"
+                    <$> getModuleImplementationField modEntity
+        proto <- placedApply resolveEntityTypes . snd $ entityVis
+        let deps = List.filter (`Set.member` modSet)
+                $ (catMaybes . (typeModule . entityAttrType . content <$>)
+                    . entityProtoAttrs . content)
+                    proto
+        return ((tyMod, EntityDef entityVis), tyMod, deps)
 
 -- | Resolve constructor argument types.
 resolveCtorTypes :: ProcProto -> OptPos -> Compiler (Placed ProcProto)
@@ -258,6 +269,12 @@ resolveParamType :: Param -> OptPos -> Compiler (Placed Param)
 resolveParamType param@Param{paramType=ty} pos = do
     ty' <- lookupType "constructor parameter" pos ty
     return $ param { paramType = ty' } `maybePlace` pos
+
+-- | Resolve entity attribute types.
+resolveEntityTypes :: EntityProto -> OptPos -> Compiler (Placed EntityProto)
+resolveEntityTypes proto pos = do
+    attrs <- mapM (placedApplyM resolveAttrType) $ entityProtoAttrs proto
+    return $ maybePlace (proto { entityProtoAttrs = attrs }) pos
 
 -- | Resolve the type of an entity attribute
 resolveAttrType :: EntityAttr -> OptPos -> Compiler (Placed EntityAttr)
@@ -396,6 +413,7 @@ completeType modspec (CtorDef params ctors) = do
     reexitModule
 completeType modspec (EntityDef (vis, entityProto)) = do
     logNormalise $ "Completing type " ++ showModSpec modspec
+    nyi "TODO"
     reenterModule modspec
     -- let typespec = TypeSpec [] currentModuleAlias []
     

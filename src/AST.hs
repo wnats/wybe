@@ -905,8 +905,8 @@ addConstructor vis pctor = do
     updateModule (\m -> m { modIsType  = True })
     addKnownType currMod
 
-addEntity :: Placed EntityProto -> Compiler ()
-addEntity placedEntityProto = do
+addEntity :: Visibility -> Placed EntityProto -> Compiler ()
+addEntity vis placedEntityProto = do
     let pos = place placedEntityProto
     let entityProto = content placedEntityProto
     currMod <- getModuleSpec
@@ -920,7 +920,7 @@ addEntity placedEntityProto = do
       $  errmsg pos
            $ "Declaring entity for type " ++ showModSpec currMod
            ++ " with declared constructor(s)"
-    updateImplementation (\m -> m { modEntityDecl = Just placedEntityProto })
+    updateImplementation (\m -> m { modEntity = Just (vis, placedEntityProto) })
     updateModule (\m -> m { modIsType = True })
     addKnownType currMod
 
@@ -1595,7 +1595,7 @@ data ModuleImplementation = ModuleImplementation {
                                               -- ^reversed list of data
                                               -- constructors for this
                                               -- type, if it is a type
-    modEntityDecl :: Maybe (Placed EntityProto),
+    modEntity :: Maybe (Visibility, Placed EntityProto),
     modKnownTypes:: Map Ident (Set ModSpec),  -- ^Types visible to this module
     modKnownResources :: Map Ident (Set ResourceSpec),
                                               -- ^Resources visible to this mod
