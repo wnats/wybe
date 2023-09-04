@@ -111,13 +111,28 @@ normaliseItem item@ProcDecl{} = do
     (item',tmpCtr) <- flattenProcDecl item
     logNormalise $ "Normalised proc:" ++ show item'
     addProc tmpCtr item'
-normaliseItem (EntityDecl vis placedEntityProto _) = do
+normaliseItem (EntityDecl vis placedEntityProto pos) = do
     addEntity vis placedEntityProto
+    let res = SimpleResource
+                (TypeSpec ["wybe"] "list" [TypeSpec [] currentModuleAlias []])
+                (Just (Fncall [] "[]" False [] `maybePlace` pos)) pos
+    let lookupName = "std_lookup"
+    addSimpleResource lookupName res vis
+    normaliseItem $ 
+        StmtDecl (ProcCall (regularProc "=") Det False
+                    [Unplaced $ varSet lookupName,
+                     Unplaced $ Fncall [] "[]" False []]) pos
 normaliseItem (StmtDecl stmt pos) = do
     logNormalise $ "Normalising statement decl " ++ show stmt
     updateModule (\s -> s { stmtDecls = maybePlace stmt pos : stmtDecls s})
-normaliseItem (PragmaDecl prag) =
+normaliseItem (PragmaDecl prag) = do
     addPragma prag
+    -- Test adding a resource
+    -- let res = SimpleResource (TypeSpec ["wybe"] "list" [TypeSpec [] currentModuleAlias []]) (Just(Unplaced $ Fncall [] "[]" False [])) Nothing
+    -- when (prag == AddSimpleResource) $ do
+    --     addSimpleResource "std_lookup" res Public
+    --     normaliseItem (StmtDecl (ProcCall (regularProc "=") Det False
+    --                                             [Unplaced $ varSet "std_lookup", Unplaced $ Fncall [] "[]" False []]) Nothing)
 
 
 -- |Normalise a nested submodule containing the specified items.
@@ -411,12 +426,12 @@ completeType modspec (CtorDef params ctors) = do
     normalise $ constItems ++ concat nonconstItemsList ++ extraItems ++ getSetItems
 
     reexitModule
-completeType modspec (EntityDef (vis, entityProto)) = do
+completeType modspec (EntityDef entityProtoVis@(vis, entityProto)) = do
     logNormalise $ "Completing type " ++ showModSpec modspec
-    nyi "TODO"
     reenterModule modspec
-    -- let typespec = TypeSpec [] currentModuleAlias []
-    
+    let typespec = TypeSpec [] currentModuleAlias []
+    info <- entityProtoInfo entityProtoVis
+    entityItems typespec info
     reexitModule
 
 
@@ -451,8 +466,8 @@ nonConstCtorInfo (vis, placedProto) tag = do
 
 -- | Analyse the representation of an entity, determining the representation
 --   and bit sizes of its members, and the sum of those bit sizes.
-entityDefInfo :: (Visibility, Placed EntityProto) -> Compiler EntityInfo
-entityDefInfo (vis, placedProto) = do
+entityProtoInfo :: (Visibility, Placed EntityProto) -> Compiler EntityInfo
+entityProtoInfo (vis, placedProto) = do
     logNormalise $ "Analysing entity prototype: " ++ show placedProto
     let (proto,pos) = unPlace placedProto
     let name = entityProtoName proto
@@ -1191,6 +1206,92 @@ equalityField param =
             [Unplaced $ varGet leftField,
              Unplaced $ varGet rightField]]
 
+----------------------------------------------------------------
+--                Generating code for entity declarations
+----------------------------------------------------------------
+
+-- | All items needed to implement an entity 
+entityItems :: TypeSpec -> EntityInfo
+               -> Compiler (TypeRepresentation, [Item], [(VarName, GetterSetterInfo)])
+entityItems typeSpec info@(EntityInfo name attrInfos vis pos bits) = do
+    -- Layout records (this is where we need relationships... or not for now?)
+    let (fields, size) = layoutEntityRecord attrInfos
+    logNormalise $ "Laid out structure size " ++ show size
+        ++ ": " ++ show fields
+    nyi "Not yet"
+
+-- | Lay out a record in memory, returning the size of the record and a
+--   a list of the fields and offsets of the structure. This ensures that
+--   values are aligned properly for their size (e.g. word sized values are
+--   aligned on word boundaries)
+layoutEntityRecord :: [EntityAttrInfo] -> ([FieldInfo], Int)
+layoutEntityRecord attrInfos =
+    -- On x64 sizes = [1, 2, 4, 8]
+    let sizes = (2^) <$> [0..floor $ logBase 2 $ fromIntegral wordSizeBytes]
+        fields = List.map
+                (\(EntityAttrInfo attr rep sz) ->
+                    let byteSize = (sz + 7) `div` 8
+                        wordSize = (byteSize + wordSizeBytes - 1)
+                                    `div` wordSizeBytes * wordSizeBytes
+                        alignment =
+                            fromMaybe wordSizeBytes $ find (>=byteSize) sizes
+                        (a, pos) = unPlace attr
+                    in ((entityAttrName a, pos, False, entityAttrType a, rep, byteSize),
+                        alignment)
+                    )
+                attrInfos
+        -- put fields in order of increasing alignment
+        ordFields = sortOn snd fields
+        initOffset = 0
+        offsets = List.foldl align ([],initOffset) ordFields
+    in mapFst reverse offsets
+    where align (aligned,offset) ((name,pos,anon,ty,rep,sz),alignment) =
+            -- alignedOffset is basically the next nearest multiple of "alignment"
+            let alignedOffset = offset + (-offset) `mod` alignment
+            in (FieldInfo name pos anon ty rep alignedOffset sz:aligned,
+                alignedOffset + sz)
+
+-- | Generate constructor code for an entity
+entityContructorItems :: Visibility -> ProcName -> TypeSpec -> [Placed Param]
+                      -> [FieldInfo] -> Int -> OptPos -> [Item]
+entityContructorItems vis entityName typeSpec params fields size pos =
+    let procName = specialName2 createName entityName
+    in [ProcDecl vis (inlineModifiers (ConstructorProc procName) Det)
+           (ProcProto procName
+               ((placedApply (\p -> maybePlace p {paramFlow=ParamIn, paramFlowType=Ordinary}) <$> params)
+                ++ [Param outputVariableName typeSpec ParamOut Ordinary `maybePlace` pos])
+               Set.empty)
+           -- Code to allocate memory for the value
+           ([maybePlace (ForeignCall "lpvm" "alloc" []
+             [Unplaced $ iVal size,
+              varSetTyped recName typeSpec `maybePlace` pos]) pos]
+            ++
+            -- Code to fill all the fields
+            List.map
+             (\(FieldInfo var pPos _ ty _ offset _) ->
+                  maybePlace (ForeignCall "lpvm" "mutate" []
+                   [varGetTyped recName typeSpec `maybePlace` pos,
+                     varSetTyped recName typeSpec `maybePlace` pos,
+                     Unplaced $ iVal offset,
+                     Unplaced $ iVal 1,
+                     Unplaced $ iVal size,
+                     Unplaced $ iVal 0,
+                     varGetTyped var ty `maybePlace` pPos]) pos)
+             fields
+             ++
+             -- Code to add the entity to the lookup table resource
+             [maybePlace (ProcCall (regularProc "[|]") Det False
+                            [varGetTyped recName typeSpec `maybePlace` pos,
+                             Unplaced $ Var "std_lookup" ParamIn Ordinary,
+                             Unplaced $ Var "std_lookup" ParamOut Ordinary]) pos]
+             )
+           pos]
+
+-- | Convert attr to param
+attrToParam :: EntityAttr -> Param
+attrToParam (EntityAttr name ty _) = Param name ty ParamIn Ordinary
+
+
 
 inlineModifiers :: ProcVariant -> Determinism -> ProcModifiers
 inlineModifiers variant detism
@@ -1203,6 +1304,9 @@ inlineModifiers variant detism
 inlineSemiDetModifiers :: ProcModifiers
 inlineSemiDetModifiers = inlineModifiers RegularProc SemiDet
 
+
+createName :: Ident
+createName = specialName "create"
 
 -- |The name of the variable holding a record
 recName :: Ident
