@@ -1855,10 +1855,12 @@ importsSelected imports items =
 
 -- | Pragmas that can be specified for a module
 data Pragma = NoStd        -- ^ Don't import that standard library for this mod
+            | AddSimpleResource
    deriving (Eq,Ord,Generic)
 
 instance Show Pragma where
     show NoStd = "no_standard_library"
+    show AddSimpleResource = "add_simple_resource"
 
 
 -- |Specify a pragma for the current module

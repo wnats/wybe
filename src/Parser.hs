@@ -106,7 +106,8 @@ pragmaItem = ident "pragma" *> (PragmaDecl <$> parsePragma)
 -- TODO:  Should use the Term parser to parse the declaration body.
 -- | Parse a Pragma, currently only "no_standard_library"
 parsePragma :: Parser Pragma
-parsePragma = ident "no_standard_library" $> NoStd
+parsePragma = (ident "no_standard_library" $> NoStd)
+                <|> (ident "add_simple_resource" $> AddSimpleResource)
 
 
 -- | Module item parser.
