@@ -1218,7 +1218,11 @@ entityItems typeSpec info@(EntityInfo name attrInfos vis pos bits) = do
     let (fields, size) = layoutEntityRecord attrInfos
     logNormalise $ "Laid out structure size " ++ show size
         ++ ": " ++ show fields
-    nyi "Not yet"
+    let attrs = attrInfoAttr <$> attrInfos
+    let params = contentApply attrToParam <$> attrs
+    let constItems = entityConstructorItems vis name typeSpec params fields size
+
+    nyi "entityItems not yet"
 
 -- | Lay out a record in memory, returning the size of the record and a
 --   a list of the fields and offsets of the structure. This ensures that
@@ -1252,15 +1256,16 @@ layoutEntityRecord attrInfos =
                 alignedOffset + sz)
 
 -- | Generate constructor code for an entity
-entityContructorItems :: Visibility -> ProcName -> TypeSpec -> [Placed Param]
+--   TODO: Add resource flow to the proc prototype
+entityConstructorItems :: Visibility -> ProcName -> TypeSpec -> [Placed Param]
                       -> [FieldInfo] -> Int -> OptPos -> [Item]
-entityContructorItems vis entityName typeSpec params fields size pos =
+entityConstructorItems vis entityName typeSpec params fields size pos =
     let procName = specialName2 createName entityName
     in [ProcDecl vis (inlineModifiers (ConstructorProc procName) Det)
            (ProcProto procName
                ((placedApply (\p -> maybePlace p {paramFlow=ParamIn, paramFlowType=Ordinary}) <$> params)
                 ++ [Param outputVariableName typeSpec ParamOut Ordinary `maybePlace` pos])
-               Set.empty)
+               $ Set.singleton memResFlowSpec)
            -- Code to allocate memory for the value
            ([maybePlace (ForeignCall "lpvm" "alloc" []
              [Unplaced $ iVal size,
@@ -1269,7 +1274,7 @@ entityContructorItems vis entityName typeSpec params fields size pos =
             -- Code to fill all the fields
             List.map
              (\(FieldInfo var pPos _ ty _ offset _) ->
-                  maybePlace (ForeignCall "lpvm" "mutate" []
+                  maybePlace (ForeignCall "lpvm" "unsafe_mutate" []
                    [varGetTyped recName typeSpec `maybePlace` pos,
                      varSetTyped recName typeSpec `maybePlace` pos,
                      Unplaced $ iVal offset,
@@ -1284,12 +1289,19 @@ entityContructorItems vis entityName typeSpec params fields size pos =
                             [varGetTyped recName typeSpec `maybePlace` pos,
                              Unplaced $ Var "std_lookup" ParamIn Ordinary,
                              Unplaced $ Var "std_lookup" ParamOut Ordinary]) pos]
+            -- Assign rec name to the output variable name
              )
            pos]
 
 -- | Convert attr to param
 attrToParam :: EntityAttr -> Param
 attrToParam (EntityAttr name ty _) = Param name ty ParamIn Ordinary
+
+-- entityGetterSetterStmts :: Visibility -> TypeSpec -> Int -> FieldInfo
+--                         -> [(VarName, GetterSetterInfo)]
+-- entityGetterSetterStmts vis rectype size (FieldInfo field pos _ fieldtype rep offset _) =
+--     [(field
+--     , GetterSetterInfo pos vis fieldtype)]
 
 
 

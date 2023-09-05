@@ -30,7 +30,7 @@ module AST (
   paramTypeFlow, primParamTypeFlow, setParamArgFlowType,
   paramToVar, primParamToArg, unzipTypeFlow, unzipTypeFlows,
   PrimProto(..), PrimParam(..), ParamInfo(..),
-  EntityProto(..), EntityAttr(..), EntityAttrModifier(..),
+  EntityProto(..), EntityAttr(..), EntityAttrModifier(..), memResFlowSpec, memParam,
   Exp(..), StringVariant(..), GlobalInfo(..), Generator(..), Stmt(..), ProcFunctor(..),
   regularProc, regularModProc,
   flattenedExpFlow, expIsVar, expIsConstant, expVar, expVar', maybeExpType, innerExp,
@@ -2768,6 +2768,13 @@ type EntityAttrName = Ident
 -- | An entity attribute modifier (is the attribute a key or index?)
 --   Can add more modifiers in the future
 data EntityAttrModifier = Key | Index deriving (Show, Generic, Ord, Eq)
+
+-- | Resource Flow Spec for impure memory management
+memResFlowSpec :: ResourceFlowSpec
+memResFlowSpec = ResourceFlowSpec (ResourceSpec ["wybe"] "mem") ParamInOut
+
+memParam :: Param
+memParam = Param "mem" (TypeSpec ["wybe"] "mem" []) ParamInOut Ordinary
 
 -- |A formal parameter, including name, type, and flow direction.
 data Param = Param {
