@@ -1269,26 +1269,23 @@ entityConstructorItems vis entityName typeSpec params fields size pos =
            -- Code to allocate memory for the value
            ([maybePlace (ForeignCall "lpvm" "alloc" []
              [Unplaced $ iVal size,
-              varSetTyped recName typeSpec `maybePlace` pos]) pos]
+              varSetTyped outputVariableName typeSpec `maybePlace` pos]) pos]
             ++
             -- Code to fill all the fields
             List.map
              (\(FieldInfo var pPos _ ty _ offset _) ->
                   maybePlace (ForeignCall "lpvm" "unsafe_mutate" []
-                   [varGetTyped recName typeSpec `maybePlace` pos,
-                     varSetTyped recName typeSpec `maybePlace` pos,
+                   [varGetTyped outputVariableName typeSpec `maybePlace` pos,
                      Unplaced $ iVal offset,
-                     Unplaced $ iVal 1,
-                     Unplaced $ iVal size,
-                     Unplaced $ iVal 0,
-                     varGetTyped var ty `maybePlace` pPos]) pos)
+                     varGetTyped var ty `maybePlace` pPos,
+                     placedMemExp]) pos)
              fields
              ++
              -- Code to add the entity to the lookup table resource
              [maybePlace (ProcCall (regularProc "[|]") Det False
                             [varGetTyped recName typeSpec `maybePlace` pos,
-                             Unplaced $ Var "std_lookup" ParamIn Ordinary,
-                             Unplaced $ Var "std_lookup" ParamOut Ordinary]) pos]
+                             Unplaced $ varGet "std_lookup",
+                             Unplaced $ varSet "std_lookup"]) pos]
             -- Assign rec name to the output variable name
              )
            pos]
@@ -1297,11 +1294,41 @@ entityConstructorItems vis entityName typeSpec params fields size pos =
 attrToParam :: EntityAttr -> Param
 attrToParam (EntityAttr name ty _) = Param name ty ParamIn Ordinary
 
--- entityGetterSetterStmts :: Visibility -> TypeSpec -> Int -> FieldInfo
---                         -> [(VarName, GetterSetterInfo)]
--- entityGetterSetterStmts vis rectype size (FieldInfo field pos _ fieldtype rep offset _) =
---     [(field
---     , GetterSetterInfo pos vis fieldtype)]
+placedMemExp :: Placed Exp
+placedMemExp = Unplaced $ varGetSet "mem" Ordinary
+
+data EntityGetterSetterInfo = EntityGetterSetterInfo {
+    egsPos :: OptPos,
+    egsVisibility :: Visibility,
+    egsTypeSpec :: TypeSpec,
+    egsGetter :: [Placed Stmt],
+    egsSetter :: [Placed Stmt]
+} deriving (Show, Eq, Ord)
+
+entityGetterSetterStmts :: Visibility -> TypeSpec -> Int -> FieldInfo
+                        -> [(VarName, EntityGetterSetterInfo)]
+entityGetterSetterStmts vis rectype size (FieldInfo field pos _ fieldtype rep offset _) =
+    let getter = [maybePlace (ForeignCall "lpvm" "access" []
+                    [ varGetTyped recName rectype `maybePlace` pos
+                    , Unplaced $ iVal offset
+                    , Unplaced $ iVal size
+                    , varSetTyped outputVariableName fieldtype `maybePlace` pos
+                    , placedMemExp
+                    ]) pos]
+        setter = [maybePlace (ForeignCall "lpvm" "unsafe_mutate" []
+                    [ varGetTyped recName rectype `maybePlace` pos
+                    , Unplaced $ iVal offset
+                    , Unplaced $ varGet fieldName
+                    , placedMemExp
+                    ]) pos]
+        info = EntityGetterSetterInfo {
+            egsPos = pos,
+            egsVisibility = vis,
+            egsTypeSpec = fieldtype,
+            egsGetter = getter,
+            egsSetter = setter
+        }
+    in [(field, info)]
 
 
 
