@@ -1,4 +1,4 @@
-# purpose: Impure Memory Management
+# purpose: Storing entities and relationships
 # since  : 0.1
 
 pragma no_standard_library  # Standard library can't depend on itself!
@@ -6,4 +6,4 @@ pragma no_standard_library  # Standard library can't depend on itself!
 pub use wybe.phantom
 use wybe.char
 
-pub resource mem:phantom = 0:phantom
+pub resource db:phantom = 0:phantom
