@@ -1,9 +1,0 @@
-# purpose: Storing entities and relationships
-# since  : 0.1
-
-pragma no_standard_library  # Standard library can't depend on itself!
-
-pub use wybe.phantom
-use wybe.char
-
-pub resource db:phantom = 0:phantom
