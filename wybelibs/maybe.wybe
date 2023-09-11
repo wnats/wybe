@@ -3,17 +3,17 @@
 
 pub constructors (T) nothing | just(value:T)
 
-pub def maybe(d:B, f:(A,?B), m:_(A)):B = (f(m^value) | d)
+pub def {inline} maybe(d:B, f:(A,?B), m:_(A)):B = (f(m^value) | d)
 
-pub def {test} is_just(m:_(T)) {
+pub def {test, inline} is_just(m:_(T)) {
     m = just(_)
 }
 
-pub def {test} is_nothing(m:_(T)) {
+pub def {test, inline} is_nothing(m:_(T)) {
     if { m = just(_) :: fail | else :: pass }
 }
 
-pub def from_maybe(d:T, m:_(T)):T = (m^value | d)
+pub def {inline} from_maybe(d:T, m:_(T)):T = (m^value | d)
 
 pub def cat_maybes(ms:list(_(T))):list(T) = xs where {
     ?xs = []
