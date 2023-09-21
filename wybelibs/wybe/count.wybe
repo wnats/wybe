@@ -53,6 +53,23 @@ pub def (x:_ % y:_):_ = foreign llvm urem(x,y)
 # Modulus assignment.
 pub def (!x:_ %= y:_) { ?x = x % y }
 
+# Bit-shift left.
+pub def (x:_ << s:_):_ = foreign llvm shl(x, s)
+
+# Bit-shift left assignment.
+pub def (!x:_ <<= s:_) { ?x = x << s }
+
+# Logical bit-shift right (pad with zeroes).
+# e.g.  3 >> 1 = 1                   (00...011 >> 1 = 00...001)
+#      -3 >> 1 = 9223372036854775806 (11...101 >> 1 = 01...110)
+# on a 64-bit machine
+pub def logical_bitshift(x:_, s:_):_ = foreign llvm lshr(x, s)
+
+# Bit-wise xor.
+pub def xor(x:_, y:_):_ = foreign llvm xor(x, y)
+
+# Bit-wise and.
+pub def and(x:_, y:_):_ = foreign llvm and(x, y)
 
 ## Comparisons
 

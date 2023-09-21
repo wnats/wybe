@@ -27,6 +27,11 @@ pub def array(x:T, len:int):_(T) = ar where {
     ?ar = array(len, data)
 }
 
+pub def uninitialised_array(len:int):_(T) = ar where {
+    ?size = len * word_size_bytes
+    foreign lpvm alloc(size, ?data)
+    ?ar = array(len, data)
+}
 
 ## Conversion procedures
 

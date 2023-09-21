@@ -1,0 +1,94 @@
+#|
+Python equivalent:
+def gen_T():
+    T = []
+    for i in range(8):
+        T.append([])
+        for j in range(256):
+            T[i].append(random.randint(0, 2**64-1))
+    return T
+
+def hash(T: list, x: int, size: int):
+    res = 0
+    for i in range(size):
+        res ^= T[256*i + (x & 255)]
+        x >>= 8
+    return res
+|#
+
+use random
+
+pub resource tab_hash:array(count) = uninitialised_array(1)
+
+pub def generate_lookup_table use !random, ?tab_hash {
+    ?n_chunks = 8
+    ?poss_vals = 256
+    ?table_size = n_chunks * poss_vals
+    ?tab_hash = uninitialised_array(table_size)
+    for ?i in 0..table_size {
+        !random(?n:count)
+        unsafe_update(!tab_hash, i, n)
+    }
+}
+
+pub def hash(x:count, ?h_x:count) use tab_hash {
+    ?h_x = 0:count
+    ?table_size = tab_hash^length
+    for ?i in 0..8 {
+        # Cast to int since unsafe_get accepts int, not count
+        ?last_8_bits = foreign lpvm cast(and(x, 255:count)):int
+        ?h_x = xor(h_x, unsafe_get(tab_hash, (256*i + last_8_bits) % table_size))
+        ?x = logical_bitshift(x, 8:count)
+    }
+}
+
+pub def hash(x:int, ?h_x:count) use tab_hash {
+    ?h_x = 0:count
+    ?table_size = tab_hash^length
+    for ?i in 0..8 {
+        # Cast to int since unsafe_get accepts int, not count
+        ?last_8_bits = and(x, 255)
+        ?h_x = xor(h_x, unsafe_get(tab_hash, (256*i + last_8_bits) % table_size))
+        ?x = logical_bitshift(x, 8)
+    }
+}
+
+pub def hash(x:string, ?h_x: count) use tab_hash {
+    ?h_x = 0:count
+    ?table_size = tab_hash^length
+    ?i = 0
+    for ?chr in x {
+        ?h_x = xor(h_x, unsafe_get(tab_hash, (256*i + ord(chr) + i/8) % table_size))
+        !i += 1
+    }
+}
+
+
+!set_random_seed(foreign c time(0))
+!generate_lookup_table
+
+#| Testing counts
+for ?i in 0..10 {
+    #!random(?n:count)
+    foreign lpvm cast(i, ?n:count)
+    !print("n: "); !println(n)
+    !hash(n, ?h_n)
+    !print("h_n (% 50): "); !println(h_n % 50:count)
+}
+|#
+
+#| Testing ints
+for ?i in 0..10 {
+    !print("i: "); !println(i)
+    !hash(i, ?h_i)
+    !print("h_i (% 50): "); !println(h_i % 50:count)
+}
+|#
+
+#| Testing hash strings
+for ?str in ["Steven", "Stanley", "Sutanrii"] {
+    !print("str: "); !println(str)
+    !hash(str, ?h_str)
+    !print("h_str (% 50): "); !println(h_str % 50:count)
+}
+|#
