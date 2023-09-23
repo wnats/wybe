@@ -84,9 +84,8 @@ instance Binary TypeModifiers
 instance Binary TypeImpln
 
 -- Entity
-instance Binary EntityProto
-instance Binary EntityAttr
-instance Binary EntityAttrModifier
+instance Binary EntityModifier
+instance Binary EntityModifierType
 
 -- * Manual Serialisation
 

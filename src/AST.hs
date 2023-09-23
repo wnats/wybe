@@ -30,7 +30,7 @@ module AST (
   paramTypeFlow, primParamTypeFlow, setParamArgFlowType,
   paramToVar, primParamToArg, unzipTypeFlow, unzipTypeFlows,
   PrimProto(..), PrimParam(..), ParamInfo(..),
-  EntityProto(..), EntityAttr(..), EntityAttrModifier(..), memResFlowSpec, memParam,
+  EntityModifier(..), EntityModifierType(..), memResFlowSpec, memParam,
   Exp(..), StringVariant(..), GlobalInfo(..), Generator(..), Stmt(..), ProcFunctor(..),
   regularProc, regularModProc,
   flattenedExpFlow, expIsVar, expIsConstant, expVar, expVar', maybeExpType, innerExp,
@@ -180,7 +180,7 @@ data Item
        -- The Bool in the next two indicates whether inlining is forced
      | FuncDecl Visibility ProcModifiers ProcProto TypeSpec (Placed Exp) OptPos
      | ProcDecl Visibility ProcModifiers ProcProto [Placed Stmt] OptPos
-     | EntityDecl Visibility (Placed EntityProto) OptPos
+     | EntityDecl Visibility (Placed ProcProto) [EntityModifier] OptPos
      | StmtDecl Stmt OptPos
      | PragmaDecl Pragma
      deriving (Generic, Eq)
@@ -905,8 +905,8 @@ addConstructor vis pctor = do
     updateModule (\m -> m { modIsType  = True })
     addKnownType currMod
 
-addEntity :: Visibility -> Placed EntityProto -> Compiler ()
-addEntity vis placedEntityProto = do
+addEntity :: Visibility -> Placed ProcProto -> [EntityModifier] -> Compiler ()
+addEntity vis placedEntityProto entityModifiers = do
     let pos = place placedEntityProto
     let entityProto = content placedEntityProto
     currMod <- getModuleSpec
@@ -921,6 +921,7 @@ addEntity vis placedEntityProto = do
            $ "Declaring entity for type " ++ showModSpec currMod
            ++ " with declared constructor(s)"
     updateImplementation (\m -> m { modEntity = Just (vis, placedEntityProto) })
+    updateImplementation (\m -> m { modEntityModifiers = entityModifiers })
     updateModule (\m -> m { modIsType = True })
     addKnownType currMod
 
@@ -1595,7 +1596,8 @@ data ModuleImplementation = ModuleImplementation {
                                               -- ^reversed list of data
                                               -- constructors for this
                                               -- type, if it is a type
-    modEntity :: Maybe (Visibility, Placed EntityProto),
+    modEntity :: Maybe (Visibility, Placed ProcProto),
+    modEntityModifiers :: [EntityModifier],
     modKnownTypes:: Map Ident (Set ModSpec),  -- ^Types visible to this module
     modKnownResources :: Map Ident (Set ResourceSpec),
                                               -- ^Resources visible to this mod
@@ -1608,8 +1610,8 @@ data ModuleImplementation = ModuleImplementation {
 emptyImplementation :: ModuleImplementation
 emptyImplementation =
     ModuleImplementation Set.empty Map.empty Nothing Map.empty Map.empty
-                         Map.empty Nothing Nothing Map.empty Map.empty Map.empty
-                         Set.empty Set.empty Nothing
+                         Map.empty Nothing Nothing [] Map.empty Map.empty
+                         Map.empty Set.empty Set.empty Nothing
 
 
 -- These functions hack around Haskell's terrible setter syntax
@@ -2748,26 +2750,15 @@ instance Show PrimProto where
         name ++ "(" ++ intercalate ", " (List.map show params) ++ ")"
              ++ show gFlows
 
--- | An entity prototype
-data EntityProto = EntityProto {
-    entityProtoName :: EntityProtoName,
-    entityProtoAttrs :: [Placed EntityAttr]
-} deriving (Generic, Eq)
+-- | An entity's modifier
+data EntityModifier = EntityModifier {
+    entityModifierAttr :: [Ident],
+    entityModifierType :: EntityModifierType
+} deriving (Eq, Generic, Show)
 
-type EntityProtoName = Ident
-
--- | An entity attribute
-data EntityAttr = EntityAttr {
-    entityAttrName :: EntityAttrName,
-    entityAttrType :: TypeSpec,
-    entityAttrModifier :: Set.Set EntityAttrModifier
-} deriving (Generic, Eq)
-
-type EntityAttrName = Ident
-
--- | An entity attribute modifier (is the attribute a key or index?)
+-- | Modifier type for an entity's attribtue (is the attribute a key or index?)
 --   Can add more modifiers in the future
-data EntityAttrModifier = Key | Index deriving (Show, Generic, Ord, Eq)
+data EntityModifierType = Key | Index deriving (Show, Generic, Ord, Eq)
 
 -- | Resource Flow Spec for impure memory management
 memResFlowSpec :: ResourceFlowSpec
@@ -3767,9 +3758,10 @@ instance Show Item where
     ++ " {"
     ++ showBody 4 stmts
     ++ "\n  }"
-  show (EntityDecl vis entityProto pos) =
+  show (EntityDecl vis entityProto entityModifiers pos) =
     visibilityPrefix vis
     ++ show entityProto
+    ++ show entityModifiers
     ++ showOptPos pos
   show (StmtDecl stmt pos) =
     showStmt 4 stmt ++ showOptPos pos
@@ -3956,17 +3948,17 @@ instance Show PrimParam where
       in  pre ++ show ft ++ primFlowPrefix dir ++ show name
           ++ showTypeSuffix typ Nothing ++ flowStr ++ post
 
-instance Show EntityProto where
-    show (EntityProto name attrs) =
-        name ++ "(" ++ intercalate ", " (List.map show attrs) ++ ")"
+-- instance Show EntityProto where
+--     show (EntityProto name attrs) =
+--         name ++ "(" ++ intercalate ", " (List.map show attrs) ++ ")"
 
-instance Show EntityAttr where
-    show (EntityAttr name typ modifiers) =
-        name ++ showTypeSuffix typ Nothing ++ maybeModifiers
-            where
-                maybeModifiers
-                    | Set.null modifiers = ""
-                    | otherwise          = "{" ++ show modifiers ++ "}"
+-- instance Show EntityAttr where
+--     show (EntityAttr name typ modifiers) =
+--         name ++ showTypeSuffix typ Nothing ++ maybeModifiers
+--             where
+--                 maybeModifiers
+--                     | Set.null modifiers = ""
+--                     | otherwise          = "{" ++ show modifiers ++ "}"
 
 -- |Show the type of an expression, if it's known.
 showTypeSuffix :: TypeSpec -> Maybe TypeSpec -> String

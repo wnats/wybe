@@ -111,17 +111,17 @@ normaliseItem item@ProcDecl{} = do
     (item',tmpCtr) <- flattenProcDecl item
     logNormalise $ "Normalised proc:" ++ show item'
     addProc tmpCtr item'
-normaliseItem (EntityDecl vis placedEntityProto pos) = do
-    addEntity vis placedEntityProto
-    let res = SimpleResource
-                (TypeSpec ["wybe"] "list" [TypeSpec [] currentModuleAlias []])
-                (Just (Fncall [] "[]" False [] `maybePlace` pos)) pos
-    let lookupName = "std_lookup"
+normaliseItem (EntityDecl vis placedEntityProto entityMods pos) = do
+    addEntity vis placedEntityProto entityMods
+    let resInitVal = Unplaced $ Typed (IntValue 0) (TypeSpec [] currentModuleAlias []) Nothing
+        res = SimpleResource
+                (TypeSpec [] currentModuleAlias [])
+                (Just resInitVal) pos
+        lookupName = "recent_student"
     addSimpleResource lookupName res vis
-    normaliseItem $ 
+    normaliseItem $
         StmtDecl (ProcCall (regularProc "=") Det False
-                    [Unplaced $ varSet lookupName,
-                     Unplaced $ Fncall [] "[]" False []]) pos
+                    [Unplaced $ varSet lookupName, resInitVal]) pos
 normaliseItem (StmtDecl stmt pos) = do
     logNormalise $ "Normalising statement decl " ++ show stmt
     updateModule (\s -> s { stmtDecls = maybePlace stmt pos : stmtDecls s})
@@ -134,6 +134,12 @@ normaliseItem (PragmaDecl prag) = do
     --     normaliseItem (StmtDecl (ProcCall (regularProc "=") Det False
     --                                             [Unplaced $ varSet "std_lookup", Unplaced $ Fncall [] "[]" False []]) Nothing)
 
+-- | Resource Flow Spec for impure memory management
+luResFlowSpec :: ResourceFlowSpec
+luResFlowSpec = ResourceFlowSpec (ResourceSpec [] "recent_student") ParamInOut
+
+luParam :: Param
+luParam = Param "recent_student" (TypeSpec ["wybe"] "list" [TypeSpec [] currentModuleAlias []]) ParamInOut Ordinary
 
 -- |Normalise a nested submodule containing the specified items.
 normaliseSubmodule :: Ident -> Visibility -> OptPos -> [Item] -> Compiler ()
@@ -220,7 +226,8 @@ data TypeDef = CtorDef {
                                               -- with visibilities
     }
     | EntityDef {
-        entityDefMember :: (Visibility, Placed EntityProto)
+        entityDefMember :: (Visibility, Placed ProcProto),
+        entityModifiers :: [EntityModifier]
     } deriving (Eq, Show)
 
 
@@ -263,14 +270,15 @@ modTypeDeps modSet = do
         return ((tyMod, CtorDef tyParams ctorsVis), tyMod, deps)
     else do
         tyMod <- getModule modSpec
-        entityVis <- trustFromJust "modTypeDeps'"
+        entityVis <- trustFromJust "modTypeDeps"
                     <$> getModuleImplementationField modEntity
-        proto <- placedApply resolveEntityTypes . snd $ entityVis
+        entityMods <- getModuleImplementationField modEntityModifiers
+        proto <- placedApply resolveCtorTypes . snd $ entityVis
         let deps = List.filter (`Set.member` modSet)
-                $ (catMaybes . (typeModule . entityAttrType . content <$>)
-                    . entityProtoAttrs . content)
+                $ (catMaybes . (typeModule . paramType . content <$>)
+                    . procProtoParams . content)
                     proto
-        return ((tyMod, EntityDef entityVis), tyMod, deps)
+        return ((tyMod, EntityDef entityVis entityMods), tyMod, deps)
 
 -- | Resolve constructor argument types.
 resolveCtorTypes :: ProcProto -> OptPos -> Compiler (Placed ProcProto)
@@ -284,18 +292,6 @@ resolveParamType :: Param -> OptPos -> Compiler (Placed Param)
 resolveParamType param@Param{paramType=ty} pos = do
     ty' <- lookupType "constructor parameter" pos ty
     return $ param { paramType = ty' } `maybePlace` pos
-
--- | Resolve entity attribute types.
-resolveEntityTypes :: EntityProto -> OptPos -> Compiler (Placed EntityProto)
-resolveEntityTypes proto pos = do
-    attrs <- mapM (placedApplyM resolveAttrType) $ entityProtoAttrs proto
-    return $ maybePlace (proto { entityProtoAttrs = attrs }) pos
-
--- | Resolve the type of an entity attribute
-resolveAttrType :: EntityAttr -> OptPos -> Compiler (Placed EntityAttr)
-resolveAttrType attr@EntityAttr{entityAttrType=ty} pos = do
-    ty' <- lookupType "entity attribute" pos ty
-    return $ attr { entityAttrType = ty' } `maybePlace` pos
 
 
 -- | Layout the types defined in the specified type dependency SCC, and then
@@ -332,20 +328,6 @@ data CtorParamInfo = CtorParamInfo {
     paramInfoAnon :: Bool,
     paramInfoTypeRep :: TypeRepresentation,
     paramInfoBitSize :: Int
-} deriving (Show)
-
-data EntityInfo = EntityInfo {
-    entityInfoName :: ProcName,
-    entityInfoAttrs :: [EntityAttrInfo],
-    entityInfoVis :: Visibility,
-    entityInfoPos :: OptPos,
-    entityInfoBits :: Int
-} deriving (Show)
-
-data EntityAttrInfo = EntityAttrInfo {
-    attrInfoAttr :: Placed EntityAttr,
-    attrInfoTypeRep :: TypeRepresentation,
-    attrInfoBitSize :: Int
 } deriving (Show)
 
 
@@ -426,12 +408,17 @@ completeType modspec (CtorDef params ctors) = do
     normalise $ constItems ++ concat nonconstItemsList ++ extraItems ++ getSetItems
 
     reexitModule
-completeType modspec (EntityDef entityProtoVis@(vis, entityProto)) = do
+completeType modspec (EntityDef entityProtoVis@(vis, entityProto) entityMods) = do
     logNormalise $ "Completing type " ++ showModSpec modspec
     reenterModule modspec
     let typespec = TypeSpec [] currentModuleAlias []
-    info <- entityProtoInfo entityProtoVis
-    entityItems typespec info
+    (entityProto', info) <- nonConstCtorInfo entityProtoVis 0
+    (rep, itemsList, gettersSetters) <- entityItems typespec info entityMods
+    setTypeRep rep
+    logNormalise $ "Representation of type " ++ showModSpec modspec
+                   ++ " is " ++ show rep
+    -- Assumes that there are no duplicate attribute names
+    -- let a = concat <$> mapM (uncurry $ entityGetterSetterItems typespec) (sortOn fst gettersSetters)
     reexitModule
 
 
@@ -464,23 +451,6 @@ nonConstCtorInfo (vis, placedProto) tag = do
     return (maybePlace proto{procProtoParams=params'} pos,
             CtorInfo name paramInfos vis pos tag bitSize)
 
--- | Analyse the representation of an entity, determining the representation
---   and bit sizes of its members, and the sum of those bit sizes.
-entityProtoInfo :: (Visibility, Placed EntityProto) -> Compiler EntityInfo
-entityProtoInfo (vis, placedProto) = do
-    logNormalise $ "Analysing entity prototype: " ++ show placedProto
-    let (proto,pos) = unPlace placedProto
-    let name = entityProtoName proto
-    let attrs = entityProtoAttrs proto
-
-    reps <- mapM (placedApply resolveAttrType >=> lookupTypeRepresentation . entityAttrType . content) attrs
-    let reps' = catMaybes reps
-    logNormalise $ "Attribute representations: " ++ intercalate ", " (show <$> reps')
-    
-    let bitSizes = typeRepSize <$> reps'
-    let bitSize = sum bitSizes
-    let attrInfos = zipWith3 EntityAttrInfo attrs reps' bitSizes
-    return $ EntityInfo name attrInfos vis pos bitSize
 
 -- | Replace a field's name with an appropriate replacement if it is anonymous
 -- (empty string). Bool indicates if the name was replaced
@@ -1211,52 +1181,44 @@ equalityField param =
 ----------------------------------------------------------------
 
 -- | All items needed to implement an entity 
-entityItems :: TypeSpec -> EntityInfo
-               -> Compiler (TypeRepresentation, [Item], [(VarName, GetterSetterInfo)])
-entityItems typeSpec info@(EntityInfo name attrInfos vis pos bits) = do
+entityItems :: TypeSpec -> CtorInfo -> [EntityModifier]
+               -> Compiler (TypeRepresentation, [Item], [(VarName, EntityGetterSetterInfo)])
+entityItems typeSpec info@(CtorInfo entityName paramInfos vis pos 0 bits) entityMods = do
     -- Layout records (this is where we need relationships... or not for now?)
-    let (fields, size) = layoutEntityRecord attrInfos
+    let (fields, size) = layoutRecord (paramInfos ++ entityPtrParamInfo entityMods) 0 1
     logNormalise $ "Laid out structure size " ++ show size
         ++ ": " ++ show fields
-    let attrs = attrInfoAttr <$> attrInfos
-    let params = contentApply attrToParam <$> attrs
-    let constItems = entityConstructorItems vis name typeSpec params fields size
+    let params = paramInfoParam <$> paramInfos
+        constItems = entityConstructorItems vis entityName typeSpec params fields size pos
+        lookupItems = entityLookupItem vis entityName typeSpec params fields size pos
+        -- egsStatements = concatMap (entityGetterSetterStmts vis typeSpec size) fields
+    nyi $ show lookupItems
+    -- return (Address,
+    --         constItems,
+    --         egsStatements)
+entityItems typeSpec (CtorInfo entityName paramInfos vis pos _ bits) _ =
+    nyi "nyi: entity with multiple constructors"
 
-    nyi "entityItems not yet"
-
--- | Lay out a record in memory, returning the size of the record and a
---   a list of the fields and offsets of the structure. This ensures that
---   values are aligned properly for their size (e.g. word sized values are
---   aligned on word boundaries)
-layoutEntityRecord :: [EntityAttrInfo] -> ([FieldInfo], Int)
-layoutEntityRecord attrInfos =
-    -- On x64 sizes = [1, 2, 4, 8]
-    let sizes = (2^) <$> [0..floor $ logBase 2 $ fromIntegral wordSizeBytes]
-        fields = List.map
-                (\(EntityAttrInfo attr rep sz) ->
-                    let byteSize = (sz + 7) `div` 8
-                        wordSize = (byteSize + wordSizeBytes - 1)
-                                    `div` wordSizeBytes * wordSizeBytes
-                        alignment =
-                            fromMaybe wordSizeBytes $ find (>=byteSize) sizes
-                        (a, pos) = unPlace attr
-                    in ((entityAttrName a, pos, False, entityAttrType a, rep, byteSize),
-                        alignment)
-                    )
-                attrInfos
-        -- put fields in order of increasing alignment
-        ordFields = sortOn snd fields
-        initOffset = 0
-        offsets = List.foldl align ([],initOffset) ordFields
-    in mapFst reverse offsets
-    where align (aligned,offset) ((name,pos,anon,ty,rep,sz),alignment) =
-            -- alignedOffset is basically the next nearest multiple of "alignment"
-            let alignedOffset = offset + (-offset) `mod` alignment
-            in (FieldInfo name pos anon ty rep alignedOffset sz:aligned,
-                alignedOffset + sz)
+-- | Generates param info for pointer fields in an entity
+entityPtrParamInfo :: [EntityModifier] -> [CtorParamInfo]
+entityPtrParamInfo entityMods = nextPtrParamInfo:indexPtrParamInfos
+    where
+        ptrParamInfo name = CtorParamInfo
+                                (Unplaced $
+                                    Param name
+                                        (Representation Address)
+                                        ParamIn
+                                        Ordinary)
+                                False Address wordSizeBytes
+        -- Points to the next entity
+        nextPtrParamInfo = ptrParamInfo $ ptrName []
+            
+        -- Points to the next entity with the same indexed attribute
+        entityIndices = List.filter ((==Index) . entityModifierType) entityMods
+        ptrName names = List.concatMap ('#':) ("next":names)
+        indexPtrParamInfos =  List.map (ptrParamInfo . ptrName . entityModifierAttr) entityIndices
 
 -- | Generate constructor code for an entity
---   TODO: Add resource flow to the proc prototype
 entityConstructorItems :: Visibility -> ProcName -> TypeSpec -> [Placed Param]
                       -> [FieldInfo] -> Int -> OptPos -> [Item]
 entityConstructorItems vis entityName typeSpec params fields size pos =
@@ -1265,7 +1227,7 @@ entityConstructorItems vis entityName typeSpec params fields size pos =
            (ProcProto procName
                ((placedApply (\p -> maybePlace p {paramFlow=ParamIn, paramFlowType=Ordinary}) <$> params)
                 ++ [Param outputVariableName typeSpec ParamOut Ordinary `maybePlace` pos])
-               $ Set.singleton memResFlowSpec)
+               $ Set.fromList [memResFlowSpec, luResFlowSpec])
            -- Code to allocate memory for the value
            ([maybePlace (ForeignCall "lpvm" "alloc" []
              [Unplaced $ iVal size,
@@ -1290,10 +1252,32 @@ entityConstructorItems vis entityName typeSpec params fields size pos =
              )
            pos]
 
--- | Convert attr to param
-attrToParam :: EntityAttr -> Param
-attrToParam (EntityAttr name ty _) = Param name ty ParamIn Ordinary
+-- | Generate procs to lookup an entity
+entityLookupItem :: Visibility -> ProcName -> TypeSpec -> [Placed Param]
+                      -> [FieldInfo] -> Int -> OptPos -> Item
+entityLookupItem vis entityName typeSpec params fields size pos =
+    let procName = entityName
+        outTypeSpec = TypeSpec ["wybe"] "list" [typeSpec]
+        maybeCurrModType = TypeSpec [] "maybe" [TypeSpec [] currentModuleAlias []]
+        -- TODO: Prepend "m#" to the param names, to indicate they are maybes instead of "m_"
+        protoParams = (Param outputVariableName outTypeSpec ParamOut Ordinary `maybePlace` pos) : (placedApply (\p -> maybePlace p {paramName = "m_"++paramName p, paramType = maybeCurrModType, paramFlowType=Ordinary}) <$> params)
+        isJust pName pPos = Unplaced $ ProcCall (regularProc "is_just") SemiDet False [varGet pName `maybePlace` pPos]
+        getAttr pName = Unplaced $ ProcCall (regularProc pName) Det True [Unplaced $ varGet "ety", Unplaced $ varSet $ "exp_" ++ pName]
+        testAttrNotEqual pName pPos = Unplaced $ ProcCall (regularProc "~=") SemiDet False [Unplaced $ varSet $ "exp_" ++ pName, Unplaced $ Fncall [] "value" False [varGet pName `maybePlace` pPos]]
+        nextIfAttrNotEqual pName pPos = Unplaced $ Cond (testAttrNotEqual ("m_"++pName) pPos) [Unplaced Next] [Unplaced Nop] Nothing Nothing Nothing
+        nextIfJustAndAttrNotEqual pName pPos = Unplaced $ Cond (isJust ("m_"++pName) pPos) [getAttr pName, nextIfAttrNotEqual pName pPos] [Unplaced Nop] Nothing Nothing Nothing
+        etyChecks = placedApply (nextIfJustAndAttrNotEqual . paramName) <$> params
+        prependEtyToRes = Unplaced $ ProcCall (regularProc "[|]") Det False [Unplaced $ varGet "ety", varGet outputVariableName `maybePlace` pos, varSet outputVariableName `maybePlace` pos]
+        generatorEty = Unplaced $ In (Unplaced $ Var "ety" ParamOut Ordinary) (Unplaced $ Var "std_lookup" ParamIn Ordinary)
+        iterateTable = Unplaced $ For [generatorEty] $ etyChecks ++ [prependEtyToRes]
+        initialiseOut = Unplaced $ ProcCall (regularProc "[]") Det False [Unplaced $ varSet outputVariableName]
+        body = [initialiseOut, iterateTable]
+    in  ProcDecl vis (inlineModifiers RegularProc Det)
+            (ProcProto procName protoParams $ Set.fromList [memResFlowSpec, luResFlowSpec])
+            [initialiseOut, iterateTable]
+            pos
 
+-- | Placed expression for the mem resource
 placedMemExp :: Placed Exp
 placedMemExp = Unplaced $ varGetSet "mem" Ordinary
 
@@ -1305,6 +1289,7 @@ data EntityGetterSetterInfo = EntityGetterSetterInfo {
     egsSetter :: [Placed Stmt]
 } deriving (Show, Eq, Ord)
 
+-- | Produce a getter and a setter for one field of the specified entity
 entityGetterSetterStmts :: Visibility -> TypeSpec -> Int -> FieldInfo
                         -> [(VarName, EntityGetterSetterInfo)]
 entityGetterSetterStmts vis rectype size (FieldInfo field pos _ fieldtype rep offset _) =
@@ -1330,6 +1315,26 @@ entityGetterSetterStmts vis rectype size (FieldInfo field pos _ fieldtype rep of
         }
     in [(field, info)]
 
+-- | Construct Getter and Setter items for an attribute of an entity
+entityGetterSetterItems :: TypeSpec -> VarName -> EntityGetterSetterInfo
+                        -> Compiler [Item]
+entityGetterSetterItems recType field
+    info@(EntityGetterSetterInfo pos fieldVis fieldType getBody setBody) = do
+    let detism = Det
+        inline = Inline
+        getModifiers = setInline inline $ inlineModifiers (GetterProc field fieldType) detism
+        getProto = ProcProto field [Param recName recType ParamIn Ordinary `maybePlace` pos,
+                                    Param outputVariableName fieldType ParamOut Ordinary `maybePlace` pos]
+                        $ Set.singleton memResFlowSpec
+        setModifiers = setInline inline $ inlineModifiers (SetterProc field fieldType) detism
+        setProto = ProcProto field [Param recName recType ParamIn Ordinary `maybePlace` pos,
+                                    Param fieldName fieldType ParamIn Ordinary `maybePlace` pos]
+                        $ Set.singleton memResFlowSpec
+    return
+        [
+        ProcDecl fieldVis getModifiers getProto getBody pos,
+        ProcDecl fieldVis setModifiers setProto setBody pos
+        ]
 
 
 inlineModifiers :: ProcVariant -> Determinism -> ProcModifiers

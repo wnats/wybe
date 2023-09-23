@@ -285,12 +285,7 @@ entityItemParser v = do
     pos <- tokenPosition <$> ident "entity"
     entityProto <- term >>= parseWith termToEntityProto
     entityModifiers <- embracedTerm >>= parseWith termToEntityModifiers
-    let entityModifiers_  = List.map (Bifunctor.second Set.singleton) entityModifiers
-    let attrModifierMap = Map.fromListWith Set.union entityModifiers_
-    let placedAttrs = entityProtoAttrs $ content entityProto
-    let entityAttrsUpdated = List.map (contentApply (\attr -> attr { entityAttrModifier = fromMaybe Set.empty (Map.lookup (entityAttrName attr) attrModifierMap) })) placedAttrs
-    let entityProtoUpdated = contentApply (\proto -> proto { entityProtoAttrs = entityAttrsUpdated }) entityProto
-    return $ EntityDecl v entityProtoUpdated $ Just pos
+    return $ EntityDecl v entityProto entityModifiers $ Just pos
 
 -----------------------------------------------------------------------------
 -- Handling type modifiers                                                 --
@@ -1010,23 +1005,26 @@ termToBody (Embraced pos Brace [body] Nothing) =
     termToBody body
 termToBody other = (:[]) <$> termToStmt other
 
--- | Convert a Term to a list of (attribute, modifier) tuples
-termToEntityModifiers :: TranslateTo [(Ident, EntityAttrModifier)]
+-- | Convert a Term to a list of entity modifiers
+termToEntityModifiers :: TranslateTo [EntityModifier]
 termToEntityModifiers (Embraced pos Brace modifierSpecs Nothing) =
     mapM termToEntityModifier modifierSpecs
 termToEntityModifiers _ =
     shouldnt "Entity modifier specifications should be wrapped in braces"
 
--- | Convert a Term to an (attribute, modifier) tuple
-termToEntityModifier :: TranslateTo (Ident, EntityAttrModifier)
-termToEntityModifier (Call pos [] "::" ParamIn [attrTerm, modifierTerm]) =
-    case modifier of
-        "key" -> return (attr, Key)
-        "index" -> return (attr, Index)
-        other -> syntaxError pos "invalid modifier"
+-- | Convert a Term to an entity modifier
+termToEntityModifier :: TranslateTo EntityModifier
+termToEntityModifier (Call pos [] "::" ParamIn [attrTerms, modifierTerm]) =
+    return $ EntityModifier attrs modifier
     where
-        attr = callName attrTerm
-        modifier = callName modifierTerm
+        attrs = case attrTerms of
+                    Call _ [] attr ParamIn [] -> [attr]
+                    Embraced _ Paren attrs Nothing -> callName <$> attrs
+                    other -> nyi $ "nyi attrs " ++ show other
+        modifier = case callName modifierTerm of
+                        "key" -> Key
+                        "index" -> Index
+                        other -> nyi $ "nyi modifier " ++ other
 termToEntityModifier _ =
     shouldnt "Invalid syntax for parsing an entity modifier"
 
@@ -1376,19 +1374,19 @@ termToResourceList other =
     syntaxError (termPos other) "expected resource spec"
 
 -- | Translate a Term to an entity prototype
-termToEntityProto :: TranslateTo (Placed EntityProto)
+termToEntityProto :: TranslateTo (Placed ProcProto)
 termToEntityProto (Call pos [] name ParamIn attrs) = do
     attrs' <- mapM termToEntityAttr attrs
-    return $ EntityProto name attrs' `maybePlace` Just pos
+    return $ ProcProto name attrs' Set.empty `maybePlace` Just pos
 termToEntityProto other =
     syntaxError (termPos other)
         $ "invalid entity declaration " ++ show other
 
 -- | Translate a Term to an entity attribute
-termToEntityAttr :: TranslateTo (Placed EntityAttr)
+termToEntityAttr :: TranslateTo (Placed Param)
 termToEntityAttr (Call pos [] ":" ParamIn [Call _ [] name ParamIn [], ty]) = do
     ty' <- termToTypeSpec ty
-    return $ EntityAttr name ty' Set.empty `maybePlace` Just pos
+    return $ Param name ty' ParamIn Ordinary `maybePlace` Just pos
 termToEntityAttr other =
     syntaxError (termPos other)
         $ "invalid entity attribute " ++ show other
