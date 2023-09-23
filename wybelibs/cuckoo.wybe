@@ -1,0 +1,161 @@
+use random, hash
+
+# Constants
+def EMPTY = 0:count
+def INITIAL_TABLE_SIZE = 17:int
+def N_TABLE = 2:int
+def MAX_EVICTION = 100:count
+def BIG_PRIME = 524287:count  # to generate the second hash function
+
+# List of prime table sizes, roughly doubled each time
+def TABLE_SIZES = [17,
+                   37,
+                   79,
+                   163,
+                   331,
+                   673,
+                   1361,
+                   2729,
+                   5471,
+                   10949,
+                   21911,
+                   43853,
+                   87719,
+                   175447,
+                   350899,
+                   701819,
+                   1403641,
+                   2807303,
+                   5614657,
+                   11229331,
+                   22458671,
+                   44917381,
+                   89834777,
+                   179669557,
+                   359339171]
+
+def next_prime(cur:int):int = nxt where {
+    ?nxt = 0
+    for ?size in TABLE_SIZES {
+        if {
+            size > cur ::
+                ?nxt = size
+                break
+        |   else ::
+                ?nxt = nxt
+        }
+    }
+    if { nxt = 0 :: !error("Cuckoo: Ran out of prime table sizes") }
+}
+
+pub def insert(!cuckoo_table:array(T), !val2key:{resource}(T, ?int), val:T) use !io, tab_hash {
+    ?i_table = 0:int
+    ?eviction_cnt = 0:count
+    ?t_length = cuckoo_table^length / 2:int
+    ?cycle_exists = true
+    
+    do {
+        while eviction_cnt < MAX_EVICTION
+
+        # Compute the hash index
+        !val2key(val, ?key)
+        !hash(key, ?h_key)
+        ?h_key_mod = h_key % foreign lpvm cast(t_length):count
+        if { i_table ~= 0 :: !h_key_mod *= BIG_PRIME }
+        ?h_idx = h_key_mod % foreign lpvm cast(t_length):count
+
+        # Evict the current resident of the hash index
+        ?t_idx = t_length*i_table + foreign lpvm cast(h_idx)
+        ?vic = unsafe_get(cuckoo_table, t_idx)
+        unsafe_update(!cuckoo_table, t_idx, val)
+
+        # Prepare for the next eviction cycle (if eviction happens on this cycle)
+        if { foreign lpvm cast(vic) = EMPTY :: ?cycle_exists = false; break
+        |    else                           :: ?val = vic; incr(!eviction_cnt)
+        }
+        ?i_table = (i_table + 1) % N_TABLE
+    }
+    
+    if { cycle_exists :: ?nxt = next_prime(t_length); !print("Cycle") }
+}
+
+pub def lookup(cuckoo_table:array(T), !val2key:{resource}(T, ?int), key:int, ?res:T, ?found:bool) use !io, tab_hash {
+    ?t_length = cuckoo_table^length / 2:int
+    ?found = false
+    ?res = foreign lpvm cast(0)
+
+    for ?i_table in 0..N_TABLE {
+        # Compute the hash index
+        !hash(key, ?h_key)
+        ?h_key_mod = h_key % foreign lpvm cast(t_length):count
+        if { i_table ~= 0 :: !h_key_mod *= BIG_PRIME }
+        ?h_idx = h_key_mod % foreign lpvm cast(t_length):count
+
+        # Check if the key is equal
+        ?t_idx = t_length*i_table + foreign lpvm cast(h_idx)
+        ?val = unsafe_get(cuckoo_table, t_idx)
+        if { foreign lpvm cast(val) = EMPTY :: next }
+        !val2key(val, ?cand_key)
+
+        if {
+            cand_key = key ::
+                ?res = val
+                ?found = true
+        |   else ::
+                ?res = res
+                ?found = found
+        }
+
+        if { found :: break }
+    }
+}
+
+pub def delete(!cuckoo_table:array(T), !val2key:{resource}(T, ?int), key:int, ?deleted:bool) use tab_hash {
+    ?t_length = cuckoo_table^length / 2:int
+    ?deleted = false
+
+    for ?i_table in 0..N_TABLE {
+        # Compute the hash index
+        !hash(key, ?h_key)
+        ?h_key_mod = h_key % foreign lpvm cast(t_length):count
+        if { i_table ~= 0 :: !h_key_mod *= BIG_PRIME }
+        ?h_idx = h_key_mod % foreign lpvm cast(t_length):count
+
+        # Check if the key is equal
+        ?t_idx = t_length*i_table + foreign lpvm cast(h_idx)
+        ?val = unsafe_get(cuckoo_table, t_idx)
+        if { foreign lpvm cast(val) = EMPTY :: next }
+        !val2key(val, ?cand_key)
+        if {
+            cand_key = key :: 
+                ?deleted = true
+                unsafe_update(!cuckoo_table, t_idx, foreign lpvm cast(EMPTY))
+                break
+        |   else ::
+                ?deleted = deleted
+        }
+    }
+}
+
+
+#| Testing code
+?cuckoo_table = array(EMPTY, INITIAL_TABLE_SIZE * N_TABLE)
+?g = {resource}{?@2 = foreign lpvm cast(@1:count)-1}
+!insert(!cuckoo_table, g, 4:count)
+!print("cuckoo_table^length: "); !println(cuckoo_table^length)
+!insert(!cuckoo_table, g, 2:count)
+
+!println("Cuckoo Table:")
+for ?t in cuckoo_table {
+   !println(t)
+}
+
+!lookup(cuckoo_table, g, 4, ?res, ?found)
+#?found = true
+!print("found: "); !println(found)
+if { found :: !print("lookup(4): "); !println(res) }
+
+!lookup(cuckoo_table, g, 1, ?res, ?found)
+!print("found: "); !println(found)
+if { found :: !print("lookup(1): "); !println(res) }
+|#

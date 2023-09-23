@@ -16,7 +16,7 @@ def hash(T: list, x: int, size: int):
     return res
 |#
 
-use random
+use random, command_line
 
 pub resource tab_hash:array(count) = uninitialised_array(1)
 
@@ -63,7 +63,10 @@ pub def hash(x:string, ?h_x: count) use tab_hash {
     }
 }
 
-
+# Set the RNG seed
+if { foreign c atoi(arguments[0]) = ?RAND_SEED :: succeed
+   | else :: ?RAND_SEED = 17:int
+}
 !set_random_seed(foreign c time(0))
 !generate_lookup_table
 
