@@ -112,6 +112,11 @@ module AST (
   specialChar, specialName, specialName2,
   outputVariableName, outputStatusName,
   envParamName, envPrimParam, makeGlobalResourceName,
+  entityVariableName,
+  dbResourceName, dbResourceSpec,
+  lastEntityResourceName, lastEntityResourceSpec,
+  cuckooResourceBaseName, cuckooModSpec,
+  indexModSpec, indexResourceBaseName, indexFieldResourceSpec,
   showBody, showPlacedPrims, showStmt, showBlock, showProcDef, showProcName,
   showModSpec, showModSpecs, showResources, showOptPos, showProcDefs, showUse,
   shouldnt, nyi, checkError, checkValue, trustFromJust, trustFromJustM,
@@ -908,7 +913,7 @@ addConstructor vis pctor = do
 addEntity :: Visibility -> Placed ProcProto -> [EntityModifier] -> Compiler ()
 addEntity vis placedEntityProto entityModifiers = do
     let pos = place placedEntityProto
-    let entityProto = content placedEntityProto
+        entityProto = content placedEntityProto
     currMod <- getModuleSpec
     hasRepn <- isJust <$> getModule modTypeRep
     when hasRepn
@@ -923,6 +928,14 @@ addEntity vis placedEntityProto entityModifiers = do
     updateImplementation (\m -> m { modEntity = Just (vis, placedEntityProto) })
     updateImplementation (\m -> m { modEntityModifiers = entityModifiers })
     updateModule (\m -> m { modIsType = True })
+
+    -- Import prerequisite libraries
+    let defaultImports = [dbModSpec]
+        cuckooImports = [hashModSpec, cuckooModSpec]
+        imports = if List.null entityModifiers then defaultImports
+                  else defaultImports ++ cuckooImports
+    mapM_ (flip addImport $ importSpec Nothing Public) imports
+
     addKnownType currMod
 
 -- |Record that the specified type is known in the current module.
@@ -3665,6 +3678,50 @@ envPrimParam = PrimParam envParamName AnyType FlowIn Ordinary (ParamInfo False e
 
 makeGlobalResourceName :: ResourceSpec -> String
 makeGlobalResourceName spec = specialName2 "resource" $ show spec
+
+
+----------------------------------------------------------------
+--                 Entity symbols and resources
+----------------------------------------------------------------
+-- | Special variable name to hold an entity
+entityVariableName :: String
+entityVariableName = specialName "ety"
+
+dbResourceName :: Ident
+dbResourceName = "db"
+
+dbModSpec :: ModSpec
+dbModSpec = [dbResourceName]
+
+dbResourceSpec :: ResourceSpec
+dbResourceSpec =
+    ResourceSpec [] dbResourceName
+
+hashModSpec :: ModSpec
+hashModSpec = ["hash"]
+
+lastEntityResourceName :: String
+lastEntityResourceName = [specialChar]
+
+lastEntityResourceSpec :: ResourceSpec
+lastEntityResourceSpec =
+    ResourceSpec [] lastEntityResourceName
+
+cuckooResourceBaseName :: Ident
+cuckooResourceBaseName = "cuckoo"
+
+cuckooModSpec :: ModSpec
+cuckooModSpec = [cuckooResourceBaseName]
+
+indexModSpec :: ModSpec
+indexModSpec = [indexResourceBaseName]
+
+indexResourceBaseName :: String
+indexResourceBaseName = "index"
+
+indexFieldResourceSpec :: Ident -> ResourceSpec
+indexFieldResourceSpec fieldName =
+    ResourceSpec [] $ indexResourceBaseName ++ fieldName
 
 ----------------------------------------------------------------
 --                      Showing Compiler State
