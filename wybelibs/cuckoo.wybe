@@ -46,7 +46,7 @@ def next_prime(cur:int):int = nxt where {
     if { nxt = 0 :: !error("Cuckoo: Ran out of prime table sizes") }
 }
 
-pub def insert(!cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{resource}(K,?count), val:V) use !io {
+pub def insert(!cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{resource}(K,?count), val:V) {
     ?i_table = 0:int
     ?eviction_cnt = 0:count
     ?t_length = cuckoo_table^length / 2:int
@@ -74,7 +74,7 @@ pub def insert(!cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{resource}
         ?i_table = (i_table + 1) % N_TABLE
     }
     
-    if { cycle_exists :: ?nxt = next_prime(t_length); !print("Cycle") }
+    if { cycle_exists :: ?nxt = next_prime(t_length); !error("Cycle") }
 }
 
 pub def lookup(cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{resource}(K,?count), eq:{test}(K,K), key:K, ?res:V, ?found:bool) {
