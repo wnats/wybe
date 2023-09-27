@@ -114,6 +114,7 @@ module AST (
   envParamName, envPrimParam, makeGlobalResourceName,
   entityVariableName,
   dbResourceName, dbResourceSpec,
+  hashModSpec, tabHashResourceSpec,
   lastEntityResourceName, lastEntityResourceSpec,
   cuckooResourceBaseName, cuckooModSpec,
   indexModSpec, indexResourceBaseName, indexFieldResourceSpec,
@@ -3694,18 +3695,19 @@ dbModSpec :: ModSpec
 dbModSpec = [dbResourceName]
 
 dbResourceSpec :: ResourceSpec
-dbResourceSpec =
-    ResourceSpec [] dbResourceName
+dbResourceSpec = ResourceSpec dbModSpec dbResourceName
 
 hashModSpec :: ModSpec
 hashModSpec = ["hash"]
+
+tabHashResourceSpec :: ResourceSpec
+tabHashResourceSpec = ResourceSpec hashModSpec "tab_hash"
 
 lastEntityResourceName :: String
 lastEntityResourceName = [specialChar]
 
 lastEntityResourceSpec :: ResourceSpec
-lastEntityResourceSpec =
-    ResourceSpec [] lastEntityResourceName
+lastEntityResourceSpec = ResourceSpec [] lastEntityResourceName
 
 cuckooResourceBaseName :: Ident
 cuckooResourceBaseName = "cuckoo"

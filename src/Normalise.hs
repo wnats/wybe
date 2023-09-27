@@ -5,6 +5,8 @@
 --  License  : Licensed under terms of the MIT license.  See the file
 --           : LICENSE in the root directory of this project.
 
+{-# LANGUAGE TupleSections #-}
+
 -- |Support for normalising wybe code as parsed to a simpler form
 --  to make compiling easier.
 
@@ -454,7 +456,7 @@ completeType modspec (EntityDef entityProtoVis@(vis, entityProto) entityMods) = 
     reenterModule modspec
     let typespec = TypeSpec [] currentModuleAlias []
     (entityProto', info) <- nonConstCtorInfo entityProtoVis 0
-    (rep, itemsList, gettersSetters) <- entityItems typespec info entityMods
+    (rep, itemsList) <- entityItems typespec info entityMods
     setTypeRep rep
     logNormalise $ "Representation of type " ++ showModSpec modspec
                    ++ " is " ++ show rep
@@ -1222,50 +1224,80 @@ equalityField param =
 --                Generating code for entity declarations
 ----------------------------------------------------------------
 
--- | All items needed to implement an entity 
+-- | e.g. first + last = #first#last
+type MergedAttrNames = Ident
+
+-- | Combine attribute names
+mergeAttrNames :: [Ident] -> MergedAttrNames
+mergeAttrNames = intercalate [specialChar]
+
+data EntityModifierInfo
+    = KeyModifierInfo MergedAttrNames
+    | IndexModifierInfo MergedAttrNames
+    deriving (Eq, Show)
+
+buildEntityModifierInfo :: EntityModifier -> EntityModifierInfo
+buildEntityModifierInfo (EntityModifier attrs modType) =
+    case modType of
+        Key -> KeyModifierInfo mergedAttrs
+        Index -> IndexModifierInfo mergedAttrs
+    where
+        mergedAttrs = mergeAttrNames attrs
+
+-- | Maps attr name to a list of related entity modifiers
+type EntityModifierDict = Map Ident [EntityModifierInfo]
+
+buildEntityModifierDict :: [EntityModifier] -> EntityModifierDict
+buildEntityModifierDict entityMods =
+    Map.fromListWith (++)
+    $ List.concatMap
+        (\mod@(EntityModifier attrs _) ->
+            (, [buildEntityModifierInfo mod]) <$> attrs
+        )
+        entityMods
+
+-- | All items needed to implement an entity
+-- TODO: Add setters, lookup, handle key in create
 entityItems :: TypeSpec -> CtorInfo -> [EntityModifier]
-               -> Compiler (TypeRepresentation, [Item], [(VarName, EntityGetterSetterInfo)])
+               -> Compiler (TypeRepresentation, [Item])
 entityItems typeSpec info@(CtorInfo entityName paramInfos vis pos 0 bits) entityMods = do
-    -- Layout records (this is where we need relationships... or not for now?)
-    let (fields, size) = layoutRecord (paramInfos ++ entityPtrParamInfo typeSpec entityMods) 0 1
+    let modInfos = buildEntityModifierInfo <$> entityMods
+        indexNames = [names | IndexModifierInfo names <- modInfos]
+        (fields, size) = layoutRecord (paramInfos ++ entityPtrParamInfo typeSpec indexNames) 0 1
+
     logNormalise $ "Laid out structure size " ++ show size
         ++ ": " ++ show fields
+
     let params = paramInfoParam <$> paramInfos
-        createItem = entityCreateItems vis entityName typeSpec params fields size pos
-    logNormalise $ show createItem
-    -- nyi "not yet"
-    --     lookupItems = entityLookupItem vis entityName typeSpec params fields size pos
-    --     -- egsStatements = concatMap (entityGetterSetterStmts vis typeSpec size) fields
-    -- nyi $ show lookupItems
-    return (Address,
-            [createItem],
-            [])
+        keyNames = [names | KeyModifierInfo names <- modInfos]
+        
+        createItem = entityCreateItem vis entityName typeSpec params fields size pos keyNames
+        
+        getItems = entityGetItem vis typeSpec size <$> fields
+
+    return (Address, createItem:getItems)
+
 entityItems typeSpec (CtorInfo entityName paramInfos vis pos _ bits) _ =
     nyi "nyi: entity with multiple constructors"
 
 -- | Generates param info for pointer fields in an entity
-entityPtrParamInfo :: TypeSpec -> [EntityModifier] -> [CtorParamInfo]
-entityPtrParamInfo typeSpec entityMods = nextPtrParamInfo:indexPtrParamInfos
+--   Currently this generates pointers for next and index
+entityPtrParamInfo :: TypeSpec -> [MergedAttrNames] -> [CtorParamInfo]
+entityPtrParamInfo typeSpec indexNames =
+    ptrParamInfo <$> lastEntityResourceName:indexPtrNames
     where
-        ptrParamInfo name = CtorParamInfo
-                                (Unplaced $
-                                    Param name
-                                        typeSpec
-                                        ParamIn
-                                        Ordinary)
-                                False Address wordSize
-        -- Points to the next entity
-        nextPtrParamInfo = ptrParamInfo $ ptrName [""]
-
-        -- Points to the next entity with the same indexed attribute
-        entityIndices = List.filter ((==Index) . entityModifierType) entityMods
-        ptrName names = List.concatMap (specialChar:) names
-        indexPtrParamInfos =  List.map (ptrParamInfo . ptrName . entityModifierAttr) entityIndices
+        indexPtrNames = (specialChar:) <$> indexNames
+        ptrParamInfo name =
+            CtorParamInfo
+                (Unplaced $ Param name typeSpec ParamIn Ordinary)
+                False Address wordSize
 
 -- | Generate constructor code for an entity
-entityCreateItems :: Visibility -> ProcName -> TypeSpec -> [Placed Param]
-                      -> [FieldInfo] -> Int -> OptPos -> Item
-entityCreateItems vis entityName typeSpec params fields size pos =
+--   Add tab_hash to resource list
+entityCreateItem :: Visibility -> ProcName -> TypeSpec -> [Placed Param]
+                    -> [FieldInfo] -> Int -> OptPos -> [MergedAttrNames]
+                    -> Item
+entityCreateItem vis entityName typeSpec params fields size pos keyNames =
     ProcDecl vis (inlineModifiers (ConstructorProc procName) Det)
         (ProcProto procName protoParams resSet)
         (entityAllocStmt typeSpec size pos
@@ -1288,17 +1320,18 @@ entityCreateItems vis entityName typeSpec params fields size pos =
          indexFieldInfos) = partitionFieldInfos fields
 
         indexResFlows =
-            List.map
-                (flip ResourceFlowSpec ParamInOut . indexFieldResourceSpec . fldName)
-                indexFieldInfos
+            flip ResourceFlowSpec ParamInOut . indexFieldResourceSpec . fldName
+            <$> indexFieldInfos
         resSet = Set.fromList
-                 $ ResourceFlowSpec dbResourceSpec ParamInOut
+                 $  ResourceFlowSpec dbResourceSpec ParamInOut
                     : ResourceFlowSpec lastEntityResourceSpec ParamInOut
+                    : ResourceFlowSpec tabHashResourceSpec ParamIn -- TODO: Only include if hashing is involved i.e. there's key or index
                     : indexResFlows
 
 partitionFieldInfos :: [FieldInfo] -> ([FieldInfo], FieldInfo, [FieldInfo])
 partitionFieldInfos fieldInfos =
-    (attrFieldInfos, nextPtrFieldInfo, indexFieldInfos)
+    if List.null ptrFieldInfos then shouldnt "Empty pointer field info"
+    else (attrFieldInfos, nextPtrFieldInfo, indexFieldInfos)
     where
         attrFieldInfos = takeWhile ((/=[specialChar]) . fldName) fieldInfos
         ptrFieldInfos = dropWhile ((/=[specialChar]) . fldName) fieldInfos
@@ -1372,11 +1405,12 @@ entityFillIndexPtrStmts typeSpec indexFieldInfos pos =
         indexFieldInfos
 
 -- | Proc call to lookup on an entity based on an indexed attribute
+--   XXX Revamp for multi-keyed attributes
 cuckooPopProcCall :: Ident -> OptPos -> OptPos -> Placed Stmt
 cuckooPopProcCall key keyPos pos =
     -- !pop(index#<key>,  get#<key>, hash, `=`, <key>, ?#result, ?#success)
     ProcCall (regularModProc cuckooModSpec "pop") Det True
-        [Unplaced $ varGet $ specialName2 indexResourceBaseName key,
+        [Unplaced $ varGetSet (specialName2 indexResourceBaseName key) Ordinary,
          Unplaced $ varGet $ specialName2 "get" key,
          Unplaced $ varGet "hash",
          Unplaced $ varGet "=",
@@ -1388,20 +1422,20 @@ cuckooPopProcCall key keyPos pos =
 
 -- | Proc call to insert an entity to the hash table on a specified index
 --   attribute
+--   XXX Revamp for multi-keyed attributes
 cuckooInsertProcCall :: Ident -> OptPos -> Placed Stmt
 cuckooInsertProcCall key pos =
-    -- !insert(!index#<key>, get#<key>, hash, `=`, #ety)
+    -- !insert(!index#<key>, get#<key>, hash, #ety)
     ProcCall (regularModProc cuckooModSpec "insert") Det True
         [Unplaced $ varGetSet (specialName2 indexResourceBaseName key) Ordinary,
          Unplaced $ varGet $ specialName2 "get" key,
          Unplaced $ varGet "hash",
-         Unplaced $ varGet "=",
          varGet entityVariableName `maybePlace` pos
         ]
         `maybePlace` pos
 
 unplacedVarGetSetDb :: Placed Exp
-unplacedVarGetSetDb = Unplaced $ varGetSet "db" Ordinary
+unplacedVarGetSetDb = Unplaced $ varGetSet dbResourceName Ordinary
 
 -- | Generate procs to lookup an entity
 -- entityLookupItem :: Visibility -> ProcName -> TypeSpec -> [Placed Param]
@@ -1441,30 +1475,59 @@ data EntityGetterSetterInfo = EntityGetterSetterInfo {
 } deriving (Show, Eq, Ord)
 
 -- | Produce a getter and a setter for one field of the specified entity
-entityGetterSetterStmts :: Visibility -> TypeSpec -> Int -> FieldInfo
-                        -> [(VarName, EntityGetterSetterInfo)]
-entityGetterSetterStmts vis rectype size (FieldInfo field pos _ fieldtype rep offset _) =
-    let getter = [maybePlace (ForeignCall "lpvm" "access" []
-                    [ varGetTyped recName rectype `maybePlace` pos
-                    , Unplaced $ iVal offset
-                    , Unplaced $ iVal size
-                    , varSetTyped outputVariableName fieldtype `maybePlace` pos
-                    , placedMemExp
-                    ]) pos]
-        setter = [maybePlace (ForeignCall "lpvm" "unsafe_mutate" []
-                    [ varGetTyped recName rectype `maybePlace` pos
-                    , Unplaced $ iVal offset
-                    , Unplaced $ varGet fieldName
-                    , placedMemExp
-                    ]) pos]
-        info = EntityGetterSetterInfo {
-            egsPos = pos,
-            egsVisibility = vis,
-            egsTypeSpec = fieldtype,
-            egsGetter = getter,
-            egsSetter = setter
-        }
-    in [(field, info)]
+-- entityGetterSetterStmts :: Visibility -> TypeSpec -> Int -> FieldInfo
+--                         -> [(VarName, EntityGetterSetterInfo)]
+-- entityGetterSetterStmts vis rectype size (FieldInfo field pos _ fieldtype rep offset _) =
+--     let getter = [maybePlace (ForeignCall "lpvm" "access" []
+--                     [ varGetTyped recName rectype `maybePlace` pos
+--                     , Unplaced $ iVal offset
+--                     , Unplaced $ iVal size
+--                     , varSetTyped outputVariableName fieldtype `maybePlace` pos
+--                     , placedMemExp
+--                     ]) pos]
+--         setter = [maybePlace (ForeignCall "lpvm" "unsafe_mutate" []
+--                     [ varGetTyped recName rectype `maybePlace` pos
+--                     , Unplaced $ iVal offset
+--                     , Unplaced $ varGet fieldName
+--                     , placedMemExp
+--                     ]) pos]
+--         info = EntityGetterSetterInfo {
+--             egsPos = pos,
+--             egsVisibility = vis,
+--             egsTypeSpec = fieldtype,
+--             egsGetter = getter,
+--             egsSetter = setter
+--         }
+--     in [(field, info)]
+
+    -- [ForeignCall "lpvm" "unsafe_mutate" []
+    --     [varGetTyped entityVariableName typeSpec `maybePlace` pos,
+    --         Unplaced $ iVal offset,
+    --         Unplaced $ varGetTyped lastEntityResourceName ty,
+    --         unplacedVarGetSetDb]
+
+entityGetItem :: Visibility -> TypeSpec -> Int -> FieldInfo -> Item
+entityGetItem vis etyType etySize (FieldInfo fieldName pos _ fieldType rep offset _) =
+    ProcDecl vis (inlineModifiers (GetterProc fieldName fieldType) Det)
+        (ProcProto procName protoParams resSet) [stmt] pos
+    where
+        procName = specialName2 getName fieldName
+        protoParams = [Param entityVariableName etyType ParamIn Ordinary
+                        `maybePlace` pos,
+                       Param outputVariableName fieldType ParamOut Ordinary
+                        `maybePlace` pos
+                      ]
+        resSet = Set.singleton $ ResourceFlowSpec dbResourceSpec ParamInOut
+        -- foreign lpvm access(#ety, <offset>, <size>, 0, ?#result, !db)
+        stmt = ForeignCall "lpvm" "access" []
+                [varGetTyped entityVariableName etyType `maybePlace` pos,
+                 Unplaced $ iVal offset,
+                 Unplaced $ iVal etySize,
+                 Unplaced $ iVal 0,
+                 varSetTyped outputVariableName fieldType `maybePlace` pos,
+                 unplacedVarGetSetDb
+                ]
+                `maybePlace` pos
 
 -- | Construct Getter and Setter items for an attribute of an entity
 entityGetterSetterItems :: TypeSpec -> VarName -> EntityGetterSetterInfo
@@ -1502,6 +1565,12 @@ inlineSemiDetModifiers = inlineModifiers RegularProc SemiDet
 
 createName :: Ident
 createName = "create"
+
+getName :: Ident
+getName = "get"
+
+setName :: Ident
+setName = "set"
 
 -- |The name of the variable holding a record
 recName :: Ident
