@@ -165,6 +165,96 @@ pub def delete(!cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{resource}
     }
 }
 
+pub def entity_delete(!cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{resource}(K,?count), eq:{test}(K,K), ety:V, get_next:{resource}(V,?V), set_next:{resource}(V,V)) {
+    !val2key(ety, ?key)
+    !lookup(cuckoo_table, val2key, hash, eq, key, ?res, ?suc)
+    if {
+        foreign lpvm cast(res):count = foreign lpvm cast(ety):count ::
+            !get_next(ety, ?nxt)
+            !delete(cuckoo_table, val2key, hash, eq, key, ?suc)
+            if {
+                foreign lpvm cast(nxt):count ~= 0:count ::
+                    !insert(cuckoo_table, val2key, hash, nxt)
+            }
+    |   else ::
+            ?prv = res
+            do {
+                !get_next(prv, ?cur)
+                until foreign lpvm cast(cur):count = foreign lpvm cast(ety):count
+                ?prv = cur
+            }
+            !get_next(cur, ?nxt)
+            !set_next(prv, nxt)
+    }
+}
+
+#|
+# Testing entity_delete
+use random, hash, db
+!set_random_seed(17)
+!generate_lookup_table
+
+type ll {
+    pub constructor node(val:int, nxt:_)
+}
+
+?n0:ll = node(0, foreign lpvm cast(0):ll)
+?n1:ll = node(2, n0)
+?n2:ll = node(4, n1)
+?n3:ll = node(6, n2)
+
+?cuckoo_table = array(foreign lpvm cast(0):ll, INITIAL_TABLE_SIZE * N_TABLE)
+?val2key = {resource}{@^val % 2 = ?@}
+!insert(!cuckoo_table, val2key, hash, n3)
+
+!println("Cuckoo Table:")
+?i = 0
+for ?n in cuckoo_table {
+    !print(i % INITIAL_TABLE_SIZE)
+    !print(": ")
+    if {
+        foreign lpvm cast(n):count = 0:count :: !println("null")
+    |   else :: !println(n^val)
+    }
+    !i += 1
+}
+
+
+def get_val(a:ll, ?val:int) use !db {
+    foreign lpvm access(a, 0, 16, 0, ?val, !db)
+}
+
+def get_next(a:ll, ?b:ll) use !db {
+    foreign lpvm access(a, 8, 16, 0, ?b, !db)
+}
+
+def set_next(a:ll, b:ll) use !db {
+    foreign lpvm unsafe_mutate(a, 8, b, !db)
+}
+
+!entity_delete(!cuckoo_table, val2key, hash, `=`, n3, get_next, set_next)
+
+!println("Cuckoo Table:")
+?i = 0
+for ?n in cuckoo_table {
+    !print(i % INITIAL_TABLE_SIZE)
+    !print(": ")
+    if {
+        foreign lpvm cast(n):count = 0:count :: !println("null")
+    |   else :: foreign lpvm access(n, 0, 16, 0, ?val:int, !db); !println(val)
+    }
+    !i += 1
+}
+
+?cur = n3
+do {
+    until foreign lpvm cast(cur):count = foreign lpvm cast(0):count
+    !get_val(cur, ?val)
+    !println(val)
+    !get_next(cur, ?cur)
+}
+|#
+
 #|
 # Testing code
 !set_random_seed(17)
