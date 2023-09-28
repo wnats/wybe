@@ -114,10 +114,11 @@ module AST (
   envParamName, envPrimParam, makeGlobalResourceName,
   entityVariableName,
   dbResourceName, dbResourceSpec,
-  hashModSpec, tabHashResourceSpec,
+  hashModSpec, hashProcName, tabHashResourceSpec,
   lastEntityResourceName, lastEntityResourceSpec,
   cuckooResourceBaseName, cuckooModSpec,
-  indexModSpec, indexResourceBaseName, indexFieldResourceSpec,
+  keyResourceBaseName, keyResourceName, keyFieldResourceSpec,
+  indexResourceBaseName, indexResourceName, indexFieldResourceSpec,
   showBody, showPlacedPrims, showStmt, showBlock, showProcDef, showProcName,
   showModSpec, showModSpecs, showResources, showOptPos, showProcDefs, showUse,
   shouldnt, nyi, checkError, checkValue, trustFromJust, trustFromJustM,
@@ -3700,6 +3701,9 @@ dbResourceSpec = ResourceSpec dbModSpec dbResourceName
 hashModSpec :: ModSpec
 hashModSpec = ["hash"]
 
+hashProcName :: ProcName
+hashProcName = "hash"
+
 tabHashResourceSpec :: ResourceSpec
 tabHashResourceSpec = ResourceSpec hashModSpec "tab_hash"
 
@@ -3715,13 +3719,23 @@ cuckooResourceBaseName = "cuckoo"
 cuckooModSpec :: ModSpec
 cuckooModSpec = [cuckooResourceBaseName]
 
-indexModSpec :: ModSpec
-indexModSpec = [indexResourceBaseName]
+keyResourceBaseName :: Ident
+keyResourceBaseName = "key"
 
-indexResourceBaseName :: String
+keyResourceName :: VarName -> ResourceName
+keyResourceName = specialName2 keyResourceBaseName
+
+keyFieldResourceSpec :: VarName -> ResourceSpec
+keyFieldResourceSpec fieldName =
+    ResourceSpec [] $ keyResourceBaseName ++ fieldName
+
+indexResourceBaseName :: Ident
 indexResourceBaseName = "index"
 
-indexFieldResourceSpec :: Ident -> ResourceSpec
+indexResourceName :: VarName -> ResourceName
+indexResourceName = specialName2 indexResourceBaseName
+
+indexFieldResourceSpec :: VarName -> ResourceSpec
 indexFieldResourceSpec fieldName =
     ResourceSpec [] $ indexResourceBaseName ++ fieldName
 
