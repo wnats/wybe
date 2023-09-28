@@ -1305,7 +1305,7 @@ entityCreateItem :: Visibility -> ProcName -> TypeSpec -> [Placed Param]
                     -> [FieldInfo] -> Int -> OptPos -> [MergedAttrNames]
                     -> Item
 entityCreateItem vis entityName typeSpec params fields size pos keyNames =
-    ProcDecl vis (noInlineModifiers (ConstructorProc procName) Det)
+    ProcDecl vis (inlineModifiers (ConstructorProc procName) Det)
         (ProcProto procName protoParams resSet)
         (entityAllocStmt typeSpec size pos
             : entityFillAttrsStmts typeSpec attrFieldInfos pos
@@ -1344,7 +1344,7 @@ entityCreateItem vis entityName typeSpec params fields size pos keyNames =
 -- | Generate getter code for an entity
 entityGetItems :: Visibility -> TypeSpec -> Int -> FieldInfo -> Item
 entityGetItems vis etyType etySize (FieldInfo fieldName pos _ fieldType rep offset _) =
-    ProcDecl vis (noInlineModifiers (GetterProc fieldName fieldType) Det)
+    ProcDecl vis (inlineModifiers (GetterProc fieldName fieldType) Det)
         (ProcProto procName protoParams resSet) [stmt] pos
     where
         procName = entityGetterName fieldName
@@ -1369,7 +1369,7 @@ entityGetItems vis etyType etySize (FieldInfo fieldName pos _ fieldType rep offs
 entitySetItems :: Visibility -> TypeSpec -> Int -> EntityModifierDict
                  -> FieldInfo -> Item
 entitySetItems vis etyType etySize modDict (FieldInfo fieldName pos _ fieldType rep offset _) =
-    ProcDecl vis (noInlineModifiers (SetterProc fieldName fieldType) Det)
+    ProcDecl vis (inlineModifiers (SetterProc fieldName fieldType) Det)
         (ProcProto procName protoParams resSet)
         (deleteStmts ++ defaultStmt:insertStmts)
         pos
