@@ -165,6 +165,13 @@ pub def delete(!cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{resource}
     }
 }
 
+pub def entity_insert(!cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{resource}(K,?count), eq:{test}(K,K), ety:V, set_next:{resource}(V,V)) {
+    !val2key(ety, ?key)
+    !pop(!cuckoo_table, val2key, hash, eq, key, ?res, ?suc)
+    !set_next(ety, res)
+    !insert(!cuckoo_table, val2key, hash, ety)
+}
+
 pub def entity_delete(!cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{resource}(K,?count), eq:{test}(K,K), ety:V, get_next:{resource}(V,?V), set_next:{resource}(V,V)) {
     !val2key(ety, ?key)
     !lookup(cuckoo_table, val2key, hash, eq, key, ?res, ?suc)
@@ -188,8 +195,24 @@ pub def entity_delete(!cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{re
     }
 }
 
+# XXX: Prettify the table
+pub def print_table(cuckoo_table:array(V), val2key:{resource}(V,?K), printer:{resource}(K)) use !io {
+    !println("Cuckoo Table:")
+    ?len = cuckoo_table^length / 2
+    ?i = 0
+    for ?n in cuckoo_table {
+        !print(i % len)
+        !print(": ")
+        if {
+            foreign lpvm cast(n):count = 0:count :: !println("NULL")
+        |   else :: !val2key(n, ?key); !printer(key); !nl
+        }
+        !i += 1
+    }
+}
+
 #|
-# Testing entity_delete
+# Testing entity hashing
 use random, hash, db
 !set_random_seed(17)
 !generate_lookup_table
@@ -197,28 +220,6 @@ use random, hash, db
 type ll {
     pub constructor node(val:int, nxt:_)
 }
-
-?n0:ll = node(0, foreign lpvm cast(0):ll)
-?n1:ll = node(2, n0)
-?n2:ll = node(4, n1)
-?n3:ll = node(6, n2)
-
-?cuckoo_table = array(foreign lpvm cast(0):ll, INITIAL_TABLE_SIZE * N_TABLE)
-?val2key = {resource}{@^val % 2 = ?@}
-!insert(!cuckoo_table, val2key, hash, n3)
-
-!println("Cuckoo Table:")
-?i = 0
-for ?n in cuckoo_table {
-    !print(i % INITIAL_TABLE_SIZE)
-    !print(": ")
-    if {
-        foreign lpvm cast(n):count = 0:count :: !println("null")
-    |   else :: !println(n^val)
-    }
-    !i += 1
-}
-
 
 def get_val(a:ll, ?val:int) use !db {
     foreign lpvm access(a, 0, 16, 0, ?val, !db)
@@ -232,19 +233,37 @@ def set_next(a:ll, b:ll) use !db {
     foreign lpvm unsafe_mutate(a, 8, b, !db)
 }
 
+def val2key(val:ll, ?key:int) use !db {
+    !get_val(val, ?v)
+    ?key = v % 2
+}
+
+?ll_null = foreign lpvm cast(0):ll
+?n0:ll = node(0, ll_null)
+?n1:ll = node(2, ll_null)
+?n2:ll = node(4, ll_null)
+?n3:ll = node(6, ll_null)
+
+?cuckoo_table = array(ll_null, INITIAL_TABLE_SIZE * N_TABLE)
+
+!entity_insert(!cuckoo_table, val2key, hash, `=`, n0, set_next)
+!entity_insert(!cuckoo_table, val2key, hash, `=`, n1, set_next)
+!entity_insert(!cuckoo_table, val2key, hash, `=`, n2, set_next)
+!entity_insert(!cuckoo_table, val2key, hash, `=`, n3, set_next)
+
+!print_table(cuckoo_table, get_val, print)
+
+?cur = n3
+do {
+    until foreign lpvm cast(cur):count = foreign lpvm cast(0):count
+    !get_val(cur, ?val)
+    !println(val)
+    !get_next(cur, ?cur)
+}
+
 !entity_delete(!cuckoo_table, val2key, hash, `=`, n3, get_next, set_next)
 
-!println("Cuckoo Table:")
-?i = 0
-for ?n in cuckoo_table {
-    !print(i % INITIAL_TABLE_SIZE)
-    !print(": ")
-    if {
-        foreign lpvm cast(n):count = 0:count :: !println("null")
-    |   else :: foreign lpvm access(n, 0, 16, 0, ?val:int, !db); !println(val)
-    }
-    !i += 1
-}
+!print_table(cuckoo_table, get_val, print)
 
 ?cur = n3
 do {
@@ -256,9 +275,10 @@ do {
 |#
 
 #|
-# Testing code
+# Testing general hashing
 !set_random_seed(17)
 !generate_lookup_table
+
 ?cuckoo_table = array(EMPTY, INITIAL_TABLE_SIZE * N_TABLE)
 ?g = {resource}{?@2 = foreign lpvm cast(@1:count)-1}
 !insert(!cuckoo_table, g, hash, 4:count)
@@ -269,9 +289,20 @@ do {
 for ?t in cuckoo_table {
    !println(t)
 }
-|#
 
-#|
+
+?cuckoo_table = array(EMPTY, INITIAL_TABLE_SIZE * N_TABLE)
+?g = {resource}{?@2 = foreign lpvm cast(@1:count)-1}
+!insert(!cuckoo_table, g, hash, 4:count)
+!print("cuckoo_table^length: "); !println(cuckoo_table^length)
+!insert(!cuckoo_table, g, hash, 2:count)
+
+!println("Cuckoo Table:")
+for ?t in cuckoo_table {
+   !println(t)
+}
+
+
 !lookup(cuckoo_table, g, 4, ?res, ?found)
 #?found = true
 !print("found: "); !println(found)
