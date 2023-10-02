@@ -928,7 +928,7 @@ addEntity vis placedEntityProto entityModifiers = do
            $ "Declaring entity for type " ++ showModSpec currMod
            ++ " with declared constructor(s)"
     updateImplementation (\m -> m { modEntity = Just (vis, placedEntityProto) })
-    updateImplementation (\m -> m { modEntityModifiers = entityModifiers })
+    updateImplementation (\m -> m { modEntityModifiers = Just entityModifiers })
     updateModule (\m -> m { modIsType = True })
 
     -- Import prerequisite libraries
@@ -1612,7 +1612,8 @@ data ModuleImplementation = ModuleImplementation {
                                               -- constructors for this
                                               -- type, if it is a type
     modEntity :: Maybe (Visibility, Placed ProcProto),
-    modEntityModifiers :: [EntityModifier],
+    modEntityModifiers :: Maybe [EntityModifier],
+    modEntityResources :: Maybe (Set ResourceSpec),
     modKnownTypes:: Map Ident (Set ModSpec),  -- ^Types visible to this module
     modKnownResources :: Map Ident (Set ResourceSpec),
                                               -- ^Resources visible to this mod
@@ -1625,8 +1626,8 @@ data ModuleImplementation = ModuleImplementation {
 emptyImplementation :: ModuleImplementation
 emptyImplementation =
     ModuleImplementation Set.empty Map.empty Nothing Map.empty Map.empty
-                         Map.empty Nothing Nothing [] Map.empty Map.empty
-                         Map.empty Set.empty Set.empty Nothing
+                         Map.empty Nothing Nothing Nothing Nothing Map.empty
+                         Map.empty Map.empty Set.empty Set.empty Nothing
 
 
 -- These functions hack around Haskell's terrible setter syntax

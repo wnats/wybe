@@ -220,7 +220,8 @@ import           Options                   (LogSelection (..), Options (..),
 import           Parser                    (parseWybe)
 import           Resources                 (resourceCheckMod,
                                             transformProcResources,
-                                            canonicaliseProcResources)
+                                            canonicaliseProcResources,
+                                            monkeyPatchEntityResources)
 import           Unique                    ( uniquenessCheckProc )
 import           Scanner                   (fileTokens)
 import           System.Directory
@@ -233,7 +234,7 @@ import           Transform                 (transformProc,
 import           Types                     (typeCheckModSCC,
                                             validateModExportTypes)
 import           Unbranch                  (unbranchProc)
-import           Util                      (sccElts, useLocalCacheFileIfPossible)
+import           Util                      (sccElts, useLocalCacheFileIfPossible, (&&&))
 import           Snippets
 import           Text.Parsec.Error
 import           BinaryFactory
@@ -809,6 +810,7 @@ compileModSCC mspecs = do
     -- Fixed point needed because eventually resources can bundle
     -- resources from other modules
     fixpointProcessSCC resourceCheckMod mspecs
+    mapM_ (transformModuleProcs monkeyPatchEntityResources) mspecs
     mapM_ (transformModuleProcs canonicaliseProcResources)  mspecs
     stopOnError $ "processing resources for module(s) " ++ showModSpecs mspecs
     typeCheckModSCC mspecs
@@ -935,6 +937,10 @@ isStdLib :: ModSpec -> Bool
 isStdLib []    = False
 isStdLib (m:_) = m == "wybe"
 
+-- | Filter for avoiding the command line module, which is currently hardcoded
+--   into the executable module
+isCmdLine :: ModSpec -> Bool
+isCmdLine = (==["command_line"])
 
 -- |A Processor processes the specified module one iteration in a
 --  context of mutual dependency among the list of modules.  It
@@ -1029,7 +1035,9 @@ buildExecutable orderedSCCs targetMod target = do
     loadModuleIfNeeded False ["command_line"] possDirs
     let privateImport = importSpec Nothing Private
     addImport ["command_line"] privateImport `inModule` targetMod
-    depends <- orderedDependencies targetMod
+    dependsUnsorted <- orderedDependencies targetMod
+    let topoMap = sccTopoMap orderedSCCs
+        depends = sortOn (modTopoOrder topoMap . fst) dependsUnsorted
     if List.null depends || not (snd (last depends))
         then
             -- No main code in the selected module: don't build executable
@@ -1196,6 +1204,25 @@ orderedDependencies targetMod =
                 |> List.filter (\x -> x `notElem` List.map fst collected')
         visit remains collected'
 
+-- | Maps the topological order of a non-std and non-cmdline modspec
+type TopoMap = Map ModSpec Integer
+
+-- | Generate a mapping from a non-std lib and non-cmdline modspec
+--   to its topological order
+sccTopoMap :: [[ModSpec]] -> TopoMap
+sccTopoMap orderedSCCs =
+    Map.fromList
+        $ concat
+        $ zipWith (\order scc -> (,order) <$> scc) [0..] 
+        $ List.filter (not . all isStdLib &&& not . all isCmdLine) orderedSCCs
+
+-- | Takes in a topomap (defined in sccTopoMap) and a modspec, then return the
+--   modspec's topological order
+modTopoOrder :: TopoMap -> ModSpec -> Integer
+modTopoOrder topoMap modSpec =
+    case Map.lookup modSpec topoMap of
+        Just order -> order
+        Nothing -> if isStdLib modSpec then -2 else -1
 
 -----------------------------------------------------------------------------
 -- Top-Down Pass for Multiple Specialization                               --

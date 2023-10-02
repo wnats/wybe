@@ -30,6 +30,7 @@ import Data.Tuple.HT
 import Data.Tuple.Select
 import Flatten
 import Options (LogSelection(Normalise))
+import Resources (addEntityResource)
 import Snippets
 import Util
 import Distribution.Parsec.FieldLineStream (fieldLineStreamEnd)
@@ -145,12 +146,11 @@ normaliseItem (EntityDecl vis placedEntityProto entityMods pos) = do
 
     -- Handle key and index resources
     let keyMods = List.filter ((==Key). entityModifierType) entityMods
-        keyModNames = List.map (("key":) . entityModifierAttr) keyMods
-        keyResNames = List.map (intercalate [specialChar]) keyModNames
-
+        keyResNames = keyResourceName . mergeAttrNames . entityModifierAttr
+                        <$> keyMods
         indexMods = List.filter ((==Index). entityModifierType) entityMods
-        indexModNames = List.map (("index":) . entityModifierAttr) indexMods
-        indexResNames = List.map (intercalate [specialChar]) indexModNames
+        indexResNames = indexResourceName . mergeAttrNames . entityModifierAttr
+                            <$> indexMods
 
     mapM_
         (\keyResName -> do
@@ -165,6 +165,7 @@ normaliseItem (EntityDecl vis placedEntityProto entityMods pos) = do
                         initCuckooTable]) pos
         )
         (keyResNames ++ indexResNames)
+
 normaliseItem (StmtDecl stmt pos) = do
     logNormalise $ "Normalising statement decl " ++ show stmt
     updateModule (\s -> s { stmtDecls = maybePlace stmt pos : stmtDecls s})
@@ -314,8 +315,9 @@ modTypeDeps modSet = do
     else do
         tyMod <- getModule modSpec
         entityVis <- trustFromJust "modTypeDeps"
-                    <$> getModuleImplementationField modEntity
-        entityMods <- getModuleImplementationField modEntityModifiers
+                        <$> getModuleImplementationField modEntity
+        entityMods <- trustFromJust "modTypeDeps"
+                        <$> getModuleImplementationField modEntityModifiers
         proto <- placedApply resolveCtorTypes . snd $ entityVis
         let deps = List.filter (`Set.member` modSet)
                 $ (catMaybes . (typeModule . paramType . content <$>)
@@ -460,11 +462,20 @@ completeType modspec (EntityDef entityProtoVis@(vis, entityProto) entityMods) = 
     setTypeRep rep
     logNormalise $ "Representation of type " ++ showModSpec modspec
                    ++ " is " ++ show rep
+    mapM_ recordEntityResources itemsList
+    -- TEST
+    modERess <- getModuleImplementationField modEntityResources
+    logNormalise $ show modERess
     normalise itemsList
     -- Assumes that there are no duplicate attribute names
     -- let a = concat <$> mapM (uncurry $ entityGetterSetterItems typespec) (sortOn fst gettersSetters)
     reexitModule
 
+-- | Record used entity resources in a proc
+recordEntityResources :: Item -> Compiler ()
+recordEntityResources (ProcDecl _ _ (ProcProto _ _ resFlowSet) _ _) =
+    mapM_ (addEntityResource . resourceFlowRes) resFlowSet
+recordEntityResources _ = return ()
 
 -- | Analyse the representation of a single constructor, determining the
 --   representation of its members, its total size in bits (assuming it is
