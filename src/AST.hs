@@ -56,6 +56,7 @@ module AST (
   getParams, getPrimParams, getDetism, getProcDef, getProcPrimProto,
   mkTempName, updateProcDef, updateProcDefM,
   ModSpec, maybeModPrefix, ProcImpln(..), ProcDef(..), procInline, procCallCount,
+  transformModuleProcs,
   getProcGlobalFlows,
   primImpurity, flagsImpurity, flagsDetism,
   AliasMap, aliasMapToAliasPairs, ParameterID, parameterIDToVarName,
@@ -119,7 +120,8 @@ module AST (
   cuckooResourceBaseName, cuckooModSpec,
   keyResourceBaseName, keyResourceName, keyFieldResourceSpec,
   indexResourceBaseName, indexResourceName, indexFieldResourceSpec,
-  showBody, showPlacedPrims, showStmt, showBlock, showProcDef, showProcName,
+  showBody, showPlacedPrims, showStmt, showBlock, showProcDef,
+  showProcIdentifier, showProcName,
   showModSpec, showModSpecs, showResources, showOptPos, showProcDefs, showUse,
   shouldnt, nyi, checkError, checkValue, trustFromJust, trustFromJustM,
   flowPrefix, showProcModifiers, showProcModifiers', showFlags, showFlags',
@@ -1970,6 +1972,22 @@ data ProcDef = ProcDef {
 }
              deriving (Eq, Generic)
 
+-- | Takes in a monadic function that transforms a ProcDef, and a module spec
+--   whose ProcDefs we apply the transforming function on.
+transformModuleProcs :: (ProcDef -> Int -> Compiler ProcDef) -> ModSpec ->
+                        Compiler ()
+transformModuleProcs trans thisMod = do
+    reenterModule thisMod
+    -- (names, procs) <- :: StateT CompilerState IO ([Ident], [[ProcDef]])
+    (names,procs) <- unzip <$>
+                     getModuleImplementationField (Map.toList . modProcs)
+    -- for each name we have a list of procdefs, so we must double map
+    procs' <- mapM (zipWithM (flip trans) [0..]) procs
+    updateImplementation
+        (\imp -> imp { modProcs = Map.union
+                                  (Map.fromList $ zip names procs')
+                                  (modProcs imp) })
+    reexitModule
 
 -- |Whether this proc should definitely be inlined, either because the user said
 -- to, or because we inferred it would be a good idea.
@@ -3976,10 +3994,17 @@ showProcDef thisID
     ++ show def
 
 
+-- | A printable version of a proc name or HO term or foreign proc name.  First
+-- argument specifies what kind of proc it is.  Handles special empty proc
+-- name.
+showProcIdentifier :: String -> ProcName -> String
+showProcIdentifier _ ""       = "module top-level code"
+showProcIdentifier kind name = kind ++ " " ++ name
+
+
 -- | A printable version of a proc name; handles special empty proc name.
 showProcName :: ProcName -> String
-showProcName "" = "module top-level code"
-showProcName name = name
+showProcName = showProcIdentifier "proc"
 
 
 -- |How to show a type specification.

@@ -972,26 +972,6 @@ fixpointProcessSCC processor scc = do        -- must find fixpoint
 
 
 
-transformModuleProcs :: (ProcDef -> Int -> Compiler ProcDef) -> ModSpec ->
-                        Compiler ()
-transformModuleProcs trans thisMod = do
-    logBuild $ "**** Reentering module " ++ showModSpec thisMod
-    reenterModule thisMod
-    -- (names, procs) <- :: StateT CompilerState IO ([Ident], [[ProcDef]])
-    (names,procs) <- unzip <$>
-                     getModuleImplementationField (Map.toList . modProcs)
-    -- for each name we have a list of procdefs, so we must double map
-    procs' <- mapM (zipWithM (flip trans) [0..]) procs
-    updateImplementation
-        (\imp -> imp { modProcs = Map.union
-                                  (Map.fromList $ zip names procs')
-                                  (modProcs imp) })
-    reexitModule
-    logBuild $ "**** Re-exiting module " ++ showModSpec thisMod
-    return ()
-
-
-
 ------------------------ Handling Imports ------------------------
 
 -- |Handle all the imports of the current module.  When called, all
@@ -1032,9 +1012,9 @@ handleModImports _ thisMod = do
 buildExecutable :: [[ModSpec]] -> ModSpec -> FilePath -> Compiler ()
 buildExecutable orderedSCCs targetMod target = do
     possDirs <- gets $ ((,True) <$>) . optLibDirs . options
-    loadModuleIfNeeded False ["command_line"] possDirs
+    loadModuleIfNeeded False cmdLineModSpec possDirs
     let privateImport = importSpec Nothing Private
-    addImport ["command_line"] privateImport `inModule` targetMod
+    addImport cmdLineModSpec privateImport `inModule` targetMod
     dependsUnsorted <- orderedDependencies targetMod
     let topoMap = sccTopoMap orderedSCCs
         depends = sortOn (modTopoOrder topoMap . fst) dependsUnsorted
@@ -1054,7 +1034,7 @@ buildExecutable orderedSCCs targetMod target = do
             let mainMod = []
             enterModule target mainMod Nothing
             addImport ["wybe"] privateImport
-            addImport ["command_line"] privateImport
+            addImport cmdLineModSpec privateImport
             -- Import all dependencies of the target mod
             mapM_ (\m -> addImport m $ importSpec Nothing Private)
                   (fst <$> depends)
@@ -1141,7 +1121,7 @@ foreignDependencies mods =
 buildMain :: [ModSpec] -> Compiler Item
 buildMain mainImports = do
     logBuild "Generating main executable code"
-    let cmdResource name = ResourceFlowSpec (ResourceSpec ["command_line"] name)
+    let cmdResource name = ResourceFlowSpec (ResourceSpec cmdLineModSpec name)
     let mainRes = Set.fromList [cmdResource "argc" ParamIn,
                                 cmdResource "argv" ParamIn,
                                 cmdResource "exit_code" ParamOut]
@@ -1213,8 +1193,10 @@ sccTopoMap :: [[ModSpec]] -> TopoMap
 sccTopoMap orderedSCCs =
     Map.fromList
         $ concat
-        $ zipWith (\order scc -> (,order) <$> scc) [0..] 
-        $ List.filter (not . all isStdLib &&& not . all isCmdLine) orderedSCCs
+        $ zipWith (\order scc -> (,order) <$> scc) [0..]
+        $ List.filter
+            (not . all isStdLib &&& not . all (==cmdLineModSpec))
+            orderedSCCs
 
 -- | Takes in a topomap (defined in sccTopoMap) and a modspec, then return the
 --   modspec's topological order

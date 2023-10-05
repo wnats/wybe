@@ -28,7 +28,7 @@ import Data.Bits
 import Data.Graph
 import Data.Tuple.HT
 import Data.Tuple.Select
-import Flatten
+import Flatten (flattenProcBody)
 import Options (LogSelection(Normalise))
 import Resources (addEntityResource)
 import Snippets
@@ -59,6 +59,8 @@ normaliseItem :: Item -> Compiler ()
 normaliseItem (TypeDecl vis (TypeProto name params) mods
               (TypeRepresentation rep) items pos) = do
     let items' = RepresentationDecl params mods rep pos : items
+    unless (List.null params)
+      $ errmsg pos "types defined by representation cannot have type parameters"
     normaliseSubmodule name vis pos items'
 normaliseItem (TypeDecl vis (TypeProto name params) mods
               (TypeCtors ctorVis ctors) items pos) = do
@@ -111,9 +113,8 @@ normaliseItem (FuncDecl vis mods (ProcProto name params resources)
               pos]
         pos)
 normaliseItem item@ProcDecl{} = do
-    (item',tmpCtr) <- flattenProcDecl item
-    logNormalise $ "Normalised proc:" ++ show item'
-    addProc tmpCtr item'
+    logNormalise $ "Recording proc without flattening:" ++ show item
+    addProc 0 item
 normaliseItem (EntityDecl vis placedEntityProto entityMods pos) = do
     addEntity vis placedEntityProto entityMods
 
@@ -224,12 +225,14 @@ normaliseSubmodule name vis pos items = do
 --  constructors, deconstructors, accessors, mutators, and auxilliary
 --  procs, and generation of main proc for
 --  the module, which needs to know what resources are available.
+--  Finally, we flatten the body of each proc in the module scc.
 
 completeNormalisation :: [ModSpec] -> Compiler ()
-completeNormalisation mods = do
-    logNormalise $ "Completing normalisation of modules " ++ showModSpecs mods
-    completeTypeNormalisation mods
-    mapM_ (normaliseModMain `inModule`) mods
+completeNormalisation modSCC = do
+    logNormalise $ "Completing normalisation of modules " ++ showModSpecs modSCC
+    completeTypeNormalisation modSCC
+    mapM_ (normaliseModMain `inModule`) modSCC
+    mapM_ (transformModuleProcs flattenProcBody) modSCC
 
 
 -- | Layout the types on the specified module list, which comprise a strongly
@@ -562,10 +565,9 @@ initResources = do
     -- the fact that they're automatically generated as arguments to the
     -- top-level main, but we can't declare them with resource initialisations,
     -- because that would overwrite them.
-    let cmdlineModSpec = ["command_line"]
     let cmdlineResources =
-            if cmdlineModSpec == thisMod
-            then let cmdline = ResourceSpec cmdlineModSpec
+            if cmdLineModSpec == thisMod
+            then let cmdline = ResourceSpec cmdLineModSpec 
                  in [ResourceFlowSpec (cmdline "argc") ParamInOut
                     ,ResourceFlowSpec (cmdline "argv") ParamInOut]
             else []
