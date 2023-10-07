@@ -17,7 +17,7 @@ module Snippets (castFromTo, castTo, withType, intType, intCast,
                  globalStore, globalLoad,
                  primMove, primAccess, primCast,
                  boolNegate, comparison, succeedTest, failTest, testVar, succeedIfSemiDet,
-                 cmdLineModSpec) where
+                 cmdLineModSpec, countType) where
 
 import Config
 import AST
@@ -247,3 +247,7 @@ testVar name = Unplaced $ TestBool $ boolCast $ varGet name
 -- | The module specification of the command line module
 cmdLineModSpec :: ModSpec
 cmdLineModSpec = ["command_line"]
+
+-- | The count type (i.e. unsigned int)
+countType :: TypeSpec
+countType = TypeSpec ["wybe"] "count" []

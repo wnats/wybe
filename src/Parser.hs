@@ -1121,6 +1121,11 @@ termToGenerators (Call pos [] "in" ParamIn [var,exp]) = do
     var' <- termToExp var
     exp' <- termToExp exp
     return [Placed (In var' exp') pos]
+termToGenerators call@(Call pos _ _ _ _) = do
+    stmt <- termToStmt call
+    case content stmt of
+        ProcCall{} -> return [Placed (Lookup stmt) pos]
+        _ -> syntaxError (termPos call) $ "invalid generator " ++ show call
 termToGenerators other =
     syntaxError (termPos other) $ "invalid generator " ++ show other
 

@@ -172,19 +172,7 @@ normaliseItem (StmtDecl stmt pos) = do
     updateModule (\s -> s { stmtDecls = maybePlace stmt pos : stmtDecls s})
 normaliseItem (PragmaDecl prag) = do
     addPragma prag
-    -- Test adding a resource
-    -- let res = SimpleResource (TypeSpec ["wybe"] "list" [TypeSpec [] currentModuleAlias []]) (Just(Unplaced $ Fncall [] "[]" False [])) Nothing
-    -- when (prag == AddSimpleResource) $ do
-    --     addSimpleResource "std_lookup" res Public
-    --     normaliseItem (StmtDecl (ProcCall (regularProc "=") Det False
-    --                                             [Unplaced $ varSet "std_lookup", Unplaced $ Fncall [] "[]" False []]) Nothing)
 
--- | Resource Flow Spec for impure memory management
--- luResFlowSpec :: ResourceFlowSpec
--- luResFlowSpec = ResourceFlowSpec (ResourceSpec [] "recent_student") ParamInOut
-
--- luParam :: Param
--- luParam = Param "recent_student" (TypeSpec ["wybe"] "list" [TypeSpec [] currentModuleAlias []]) ParamInOut Ordinary
 
 -- |Normalise a nested submodule containing the specified items.
 normaliseSubmodule :: Ident -> Visibility -> OptPos -> [Item] -> Compiler ()
@@ -274,7 +262,7 @@ data TypeDef = CtorDef {
     }
     | EntityDef {
         entityDefMember :: (Visibility, Placed ProcProto),
-        entityModifiers :: [EntityModifier]
+        entityModifiers :: EntityModifierDict
     } deriving (Eq, Show)
 
 
@@ -319,14 +307,14 @@ modTypeDeps modSet = do
         tyMod <- getModule modSpec
         entityVis <- trustFromJust "modTypeDeps"
                         <$> getModuleImplementationField modEntity
-        entityMods <- trustFromJust "modTypeDeps"
-                        <$> getModuleImplementationField modEntityModifiers
+        entityModDict <- trustFromJust "modTypeDeps"
+                        <$> getModuleImplementationField modEntityModDict
         proto <- placedApply resolveCtorTypes . snd $ entityVis
         let deps = List.filter (`Set.member` modSet)
                 $ (catMaybes . (typeModule . paramType . content <$>)
                     . procProtoParams . content)
                     proto
-        return ((tyMod, EntityDef entityVis entityMods), tyMod, deps)
+        return ((tyMod, EntityDef entityVis entityModDict), tyMod, deps)
 
 -- | Resolve constructor argument types.
 resolveCtorTypes :: ProcProto -> OptPos -> Compiler (Placed ProcProto)
@@ -456,22 +444,18 @@ completeType modspec (CtorDef params ctors) = do
     normalise $ constItems ++ concat nonconstItemsList ++ extraItems ++ getSetItems
 
     reexitModule
-completeType modspec (EntityDef entityProtoVis@(vis, entityProto) entityMods) = do
+completeType modspec (EntityDef entityProtoVis@(vis, entityProto) entityModDict) = do
     logNormalise $ "Completing type " ++ showModSpec modspec
     reenterModule modspec
     let typespec = TypeSpec [] currentModuleAlias []
     (entityProto', info) <- nonConstCtorInfo entityProtoVis 0
-    (rep, itemsList) <- entityItems typespec info entityMods
+    (rep, itemsList) <- entityItems typespec info entityModDict
     setTypeRep rep
     logNormalise $ "Representation of type " ++ showModSpec modspec
                    ++ " is " ++ show rep
     mapM_ recordEntityResources itemsList
-    -- TEST
-    modERess <- getModuleImplementationField modEntityResources
-    logNormalise $ show modERess
     normalise itemsList
-    -- Assumes that there are no duplicate attribute names
-    -- let a = concat <$> mapM (uncurry $ entityGetterSetterItems typespec) (sortOn fst gettersSetters)
+    -- TODO: Check for duplicate attribute names
     reexitModule
 
 -- | Record used entity resources in a proc
@@ -1237,44 +1221,12 @@ equalityField param =
 --                Generating code for entity declarations
 ----------------------------------------------------------------
 
--- | e.g. first + last = #first#last
-type MergedAttrNames = Ident
-
--- | Combine attribute names
-mergeAttrNames :: [Ident] -> MergedAttrNames
-mergeAttrNames = intercalate [specialChar]
-
-data EntityModifierInfo
-    = KeyModifierInfo MergedAttrNames
-    | IndexModifierInfo MergedAttrNames
-    deriving (Eq, Show)
-
-buildEntityModifierInfo :: EntityModifier -> EntityModifierInfo
-buildEntityModifierInfo (EntityModifier attrs modType) =
-    case modType of
-        Key -> KeyModifierInfo mergedAttrs
-        Index -> IndexModifierInfo mergedAttrs
-    where
-        mergedAttrs = mergeAttrNames attrs
-
--- | Maps attr name to a list of related entity modifiers
-type EntityModifierDict = Map Ident [EntityModifierInfo]
-
-buildEntityModifierDict :: [EntityModifier] -> EntityModifierDict
-buildEntityModifierDict entityMods =
-    Map.fromListWith (++)
-    $ List.concatMap
-        (\mod@(EntityModifier attrs _) ->
-            (, [buildEntityModifierInfo mod]) <$> attrs
-        )
-        entityMods
-
 -- | All items needed to implement an entity
 -- TODO: Add lookup, handle key in create
-entityItems :: TypeSpec -> CtorInfo -> [EntityModifier]
+entityItems :: TypeSpec -> CtorInfo -> EntityModifierDict
                -> Compiler (TypeRepresentation, [Item])
-entityItems typeSpec info@(CtorInfo entityName paramInfos vis pos 0 bits) entityMods = do
-    let modInfos = buildEntityModifierInfo <$> entityMods
+entityItems typeSpec info@(CtorInfo entityName paramInfos vis pos 0 bits) modDict = do
+    let modInfos = List.nub . concat $ Map.elems modDict
         indexNames = [names | IndexModifierInfo names <- modInfos]
         (fields, size) = layoutRecord (paramInfos ++ entityPtrParamInfo typeSpec indexNames) 0 1
 
@@ -1283,16 +1235,16 @@ entityItems typeSpec info@(CtorInfo entityName paramInfos vis pos 0 bits) entity
 
     let params = paramInfoParam <$> paramInfos
         keyNames = [names | KeyModifierInfo names <- modInfos]
-        
-        createItem = entityCreateItem vis entityName typeSpec params fields size pos keyNames
-        
-        getItems = entityGetItems vis typeSpec size <$> fields
 
-        modDict = buildEntityModifierDict entityMods
+        getLastResourceItem = entityGetLastResourceItem vis typeSpec pos
+
+        createItem = entityCreateItem vis entityName typeSpec params fields size pos keyNames
+
+        getItems = entityGetItems vis typeSpec size <$> fields
 
         setItems = entitySetItems vis typeSpec size modDict <$> fields
 
-    return (Address, createItem:getItems ++ setItems)
+    return (Address, getLastResourceItem:createItem:getItems ++ setItems)
 
 entityItems typeSpec (CtorInfo entityName paramInfos vis pos _ bits) _ =
     nyi "nyi: entity with multiple constructors"
@@ -1313,6 +1265,14 @@ entityPtrParamInfo typeSpec indexNames =
 --              Entity Items (Proc Declarations)
 ----------------------------------------------------------------
 
+entityGetLastResourceItem :: Visibility -> TypeSpec -> OptPos -> Item
+entityGetLastResourceItem vis typeSpec =
+    ProcDecl vis (inlineModifiers (GetterProc procName typeSpec) Det)
+        (ProcProto procName [Unplaced $ Param outputVariableName typeSpec ParamOut Ordinary] $ Set.singleton $ ResourceFlowSpec lastEntityResourceSpec ParamIn)
+        [move (varGet lastEntityResourceName) $ varSet outputVariableName]
+    where
+        procName = "get_#"
+
 -- | Generate constructor code for an entity
 entityCreateItem :: Visibility -> ProcName -> TypeSpec -> [Placed Param]
                     -> [FieldInfo] -> Int -> OptPos -> [MergedAttrNames]
@@ -1328,8 +1288,8 @@ entityCreateItem vis entityName typeSpec params fields size pos keyNames =
         pos
     where
         procName = entityCreateName
-        protoParams = 
-            (placedApply 
+        protoParams =
+            (placedApply
                 (\p -> maybePlace p {paramFlow=ParamIn, paramFlowType=Ordinary})
                 <$> params)
             ++ [Param entityVariableName typeSpec ParamOut Ordinary

@@ -30,7 +30,9 @@ module AST (
   paramTypeFlow, primParamTypeFlow, setParamArgFlowType,
   paramToVar, primParamToArg, unzipTypeFlow, unzipTypeFlows,
   PrimProto(..), PrimParam(..), ParamInfo(..),
-  EntityModifier(..), EntityModifierType(..), memResFlowSpec, memParam,
+  EntityModifier(..), EntityModifierType(..),
+  MergedAttrNames, EntityModifierInfo(..), EntityModifierDict,
+  mergeAttrNames, buildEntityModifierDict,
   Exp(..), StringVariant(..), GlobalInfo(..), Generator(..), Stmt(..), ProcFunctor(..),
   regularProc, regularModProc,
   flattenedExpFlow, expIsVar, expIsConstant, expVar, expVar', maybeExpType, innerExp,
@@ -930,7 +932,8 @@ addEntity vis placedEntityProto entityModifiers = do
            $ "Declaring entity for type " ++ showModSpec currMod
            ++ " with declared constructor(s)"
     updateImplementation (\m -> m { modEntity = Just (vis, placedEntityProto) })
-    updateImplementation (\m -> m { modEntityModifiers = Just entityModifiers })
+    updateImplementation (\m -> m { modEntityModDict = Just
+                            $ buildEntityModifierDict entityModifiers })
     updateModule (\m -> m { modIsType = True })
 
     -- Import prerequisite libraries
@@ -1614,7 +1617,7 @@ data ModuleImplementation = ModuleImplementation {
                                               -- constructors for this
                                               -- type, if it is a type
     modEntity :: Maybe (Visibility, Placed ProcProto),
-    modEntityModifiers :: Maybe [EntityModifier],
+    modEntityModDict :: Maybe EntityModifierDict,
     modEntityResources :: Maybe (Set ResourceSpec),
     modKnownTypes:: Map Ident (Set ModSpec),  -- ^Types visible to this module
     modKnownResources :: Map Ident (Set ResourceSpec),
@@ -2515,13 +2518,21 @@ foldStmt' _   _   val Nop pos = val
 foldStmt' _   _   val Fail pos = val
 foldStmt' sfn efn val (Loop body _ _) pos = foldStmts sfn efn val body
 foldStmt' sfn efn val (UseResources _ _ body) pos = foldStmts sfn efn val body
-foldStmt' sfn efn val (For generators body) pos = val3
-    where val1 = foldExps sfn efn pos val  $ loopVar . content <$> generators
-          val2 = foldExps sfn efn pos val1 $ genExp  . content <$> generators
-          val3 = foldStmts sfn efn val2 body
+foldStmt' sfn efn val (For generators body) pos = val2
+    where val1 = List.foldl (\acc pgen -> defaultPlacedApply (foldGenerator sfn efn acc) pos pgen) val generators
+          val2 = foldStmts sfn efn val1 body
 foldStmt' _ _ val Break pos = val
 foldStmt' _ _ val Next pos = val
 
+foldGenerator :: (a -> Stmt -> OptPos -> a) -> (a -> Exp -> OptPos -> a) -> a
+              -> Generator -> OptPos -> a
+foldGenerator sfn efn val (In x xs) pos = val2
+    where val1 = foldExps sfn efn pos val [x]
+          val2 = foldExps sfn efn pos val1 [xs]
+foldGenerator sfn efn val (Lookup pStmt) pos =
+    case content pStmt of
+        procCall@ProcCall{} -> foldStmt sfn efn val procCall pos
+        _ -> shouldnt "Lookup call should be a ProcCall. This should've been caught in Parser.hs"
 
 -- |Fold over a list of expressions in a pre-order left-to-right traversal.
 -- Takes two folding functions, one for statements and one for expressions, plus
@@ -2794,12 +2805,37 @@ data EntityModifier = EntityModifier {
 --   Can add more modifiers in the future
 data EntityModifierType = Key | Index deriving (Show, Generic, Ord, Eq)
 
--- | Resource Flow Spec for impure memory management
-memResFlowSpec :: ResourceFlowSpec
-memResFlowSpec = ResourceFlowSpec (ResourceSpec ["wybe"] "mem") ParamInOut
+-- | e.g. first + last = #first#last
+type MergedAttrNames = Ident
 
-memParam :: Param
-memParam = Param "mem" (TypeSpec ["wybe"] "mem" []) ParamInOut Ordinary
+-- | Combine attribute names
+mergeAttrNames :: [Ident] -> MergedAttrNames
+mergeAttrNames = intercalate [specialChar]
+
+data EntityModifierInfo
+    = KeyModifierInfo MergedAttrNames
+    | IndexModifierInfo MergedAttrNames
+    deriving (Eq, Show, Generic)
+
+buildEntityModifierInfo :: EntityModifier -> EntityModifierInfo
+buildEntityModifierInfo (EntityModifier attrs modType) =
+    case modType of
+        Key -> KeyModifierInfo mergedAttrs
+        Index -> IndexModifierInfo mergedAttrs
+    where
+        mergedAttrs = mergeAttrNames attrs
+
+-- | Maps attr name to a list of related entity modifiers
+type EntityModifierDict = Map Ident [EntityModifierInfo]
+
+buildEntityModifierDict :: [EntityModifier] -> EntityModifierDict
+buildEntityModifierDict entityMods =
+    Map.fromListWith (++)
+    $ List.concatMap
+        (\mod@(EntityModifier attrs _) ->
+            (, [buildEntityModifierInfo mod]) <$> attrs
+        )
+        entityMods
 
 -- |A formal parameter, including name, type, and flow direction.
 data Param = Param {
@@ -3247,7 +3283,17 @@ isProcProtoArg _ _ = False
 data Generator
       = In { loopVar :: Placed Exp,  -- ^ The variable holding each value
              genExp :: Placed Exp -- ^ The generator being looped over
+        } 
+      | Lookup {
+            entityLookupCall :: Placed Stmt  -- ^ Must be a ProcCall
         } deriving (Eq,Ord,Generic)
+
+instance Show Generator where
+    show (In var gen) = show var ++ " in " ++ show gen
+    show (Lookup stmt) =
+        case content stmt of
+            ProcCall{} -> showStmt 0 $ content stmt
+            _ -> shouldnt "Non-proccall generators"
 
 -- |A variable name in SSA form, ie, a name and an natural number suffix,
 --  where the suffix is used to specify which assignment defines the value.
@@ -4195,8 +4241,7 @@ showStmt _ Fail = "fail"
 showStmt _ Nop = "pass"
 showStmt indent (For generators body) =
   "for "
-    ++ intercalate ", " [show var ++ " in " ++ show gen
-                        | (In var gen) <- content <$> generators]
+    ++ intercalate ", " (show . content <$> generators)
     ++ "{\n"
     ++ showBody (indent + 4) body
     ++ "\n}"

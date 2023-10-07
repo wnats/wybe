@@ -86,6 +86,7 @@ instance Binary TypeImpln
 -- Entity
 instance Binary EntityModifier
 instance Binary EntityModifierType
+instance Binary EntityModifierInfo
 
 -- * Manual Serialisation
 
