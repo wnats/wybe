@@ -77,9 +77,8 @@ pub def insert(!cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{resource}
     if { cycle_exists :: ?nxt = next_prime(t_length); !error("Cycle") }
 }
 
-pub def lookup(cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{resource}(K,?count), eq:{test}(K,K), key:K, ?res:V, ?found:bool) {
+pub def lookup(cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{resource}(K,?count), eq:{test}(K,K), key:K, ?res:V) {
     ?t_length = cuckoo_table^length / 2:int
-    ?found = false
     ?res = foreign lpvm cast(EMPTY)
 
     for ?i_table in 0..N_TABLE {
@@ -98,18 +97,15 @@ pub def lookup(cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{resource}(
         if {
             eq(cand_key, key) ::
                 ?res = val
-                ?found = true
                 break
         |   else ::
                 ?res = res
-                ?found = found
         }
     }
 }
 
-pub def pop(!cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{resource}(K,?count), eq:{test}(K,K), key:K, ?res:V, ?found:bool) {
+pub def pop(!cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{resource}(K,?count), eq:{test}(K,K), key:K, ?res:V) {
     ?t_length = cuckoo_table^length / 2:int
-    ?found = false
     ?res = foreign lpvm cast(EMPTY)
 
     for ?i_table in 0..N_TABLE {
@@ -128,19 +124,16 @@ pub def pop(!cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{resource}(K,
         if {
             eq(cand_key, key) ::
                 ?res = val
-                ?found = true
                 unsafe_update(!cuckoo_table, t_idx, foreign lpvm cast(EMPTY))
                 break
         |   else ::
                 ?res = res
-                ?found = found
         }
     }
 }
 
-pub def delete(!cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{resource}(K,?count), eq:{test}(K,K), key:K, ?deleted:bool) {
+pub def delete(!cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{resource}(K,?count), eq:{test}(K,K), key:K) {
     ?t_length = cuckoo_table^length / 2:int
-    ?deleted = false
 
     for ?i_table in 0..N_TABLE {
         # Compute the hash index
@@ -156,29 +149,26 @@ pub def delete(!cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{resource}
         !val2key(val, ?cand_key)
         if {
             eq(cand_key, key) :: 
-                ?deleted = true
                 unsafe_update(!cuckoo_table, t_idx, foreign lpvm cast(EMPTY))
                 break
-        |   else ::
-                ?deleted = deleted
         }
     }
 }
 
 pub def entity_insert(!cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{resource}(K,?count), eq:{test}(K,K), ety:V, set_next:{resource}(V,V)) {
     !val2key(ety, ?key)
-    !pop(!cuckoo_table, val2key, hash, eq, key, ?res, ?suc)
+    !pop(!cuckoo_table, val2key, hash, eq, key, ?res)
     !set_next(ety, res)
     !insert(!cuckoo_table, val2key, hash, ety)
 }
 
 pub def entity_delete(!cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{resource}(K,?count), eq:{test}(K,K), ety:V, get_next:{resource}(V,?V), set_next:{resource}(V,V)) {
     !val2key(ety, ?key)
-    !lookup(cuckoo_table, val2key, hash, eq, key, ?res, ?suc)
+    !lookup(cuckoo_table, val2key, hash, eq, key, ?res)
     if {
         foreign lpvm cast(res):count = foreign lpvm cast(ety):count ::
             !get_next(ety, ?nxt)
-            !delete(cuckoo_table, val2key, hash, eq, key, ?suc)
+            !delete(cuckoo_table, val2key, hash, eq, key)
             if {
                 foreign lpvm cast(nxt):count ~= 0:count ::
                     !insert(cuckoo_table, val2key, hash, nxt)

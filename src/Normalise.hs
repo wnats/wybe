@@ -121,21 +121,20 @@ normaliseItem (EntityDecl vis placedEntityProto entityMods pos) = do
     -- Handle next resource
     let etyType = TypeSpec [] currentModuleAlias []
         nullEntity = Unplaced
-                        $ Typed
-                            (ForeignFn "lpvm" "cast" [] [Unplaced $ IntValue 0])
-                            etyType Nothing
+                        $ ForeignFn "lpvm" "cast" [] [Unplaced $ iVal 0]
+                            `withType` etyType
     addSimpleResource
         lastEntityResourceName
         (SimpleResource etyType (Just nullEntity) pos)
         Public
     normaliseItem
         $ StmtDecl
-            (ProcCall (regularProc "=") Det False
-                [varSet lastEntityResourceName `maybePlace` pos,
-                nullEntity]) pos
+            (ForeignCall "llvm" "move" []
+                [nullEntity, varSet lastEntityResourceName `maybePlace` pos])
+            pos
     
     -- Prepare the cuckoo tables
-    let cuckooTableType = TypeSpec ["wybe"] "array" [etyType]
+    let cuckooTableType = arrayType etyType
         cuckooTableCount = 2
         initCuckooTableSize = 17 * cuckooTableCount
         initCuckooTable =
@@ -161,9 +160,10 @@ normaliseItem (EntityDecl vis placedEntityProto entityMods pos) = do
                 Public
             normaliseItem
                 $ StmtDecl
-                    (ProcCall (regularProc "=") Det False
-                        [varSet keyResName `maybePlace` pos,
-                        initCuckooTable]) pos
+                    (ForeignCall "llvm" "move" []
+                        [initCuckooTable,
+                         varSet keyResName `maybePlace` pos])
+                    pos
         )
         (keyResNames ++ indexResNames)
 
@@ -1235,8 +1235,11 @@ entityItems typeSpec info@(CtorInfo entityName paramInfos vis pos 0 bits) modDic
 
     let params = paramInfoParam <$> paramInfos
         keyNames = [names | KeyModifierInfo names <- modInfos]
+        cuckooType = arrayType typeSpec
 
-        getLastResourceItem = entityGetLastResourceItem vis typeSpec pos
+        getLastEtyResItem = entityGetResourceItem vis typeSpec pos lastEntityResourceSpec
+        getKeyResItems = entityGetResourceItem vis cuckooType pos . keyFieldResourceSpec <$> keyNames
+        getIndexResItems = entityGetResourceItem vis cuckooType pos . indexFieldResourceSpec <$> indexNames
 
         createItem = entityCreateItem vis entityName typeSpec params fields size pos keyNames
 
@@ -1244,7 +1247,10 @@ entityItems typeSpec info@(CtorInfo entityName paramInfos vis pos 0 bits) modDic
 
         setItems = entitySetItems vis typeSpec size modDict <$> fields
 
-    return (Address, getLastResourceItem:createItem:getItems ++ setItems)
+        itemsList = getLastEtyResItem:getKeyResItems ++ getIndexResItems
+                        ++ createItem:getItems ++ setItems
+
+    return (Address, itemsList)
 
 entityItems typeSpec (CtorInfo entityName paramInfos vis pos _ bits) _ =
     nyi "nyi: entity with multiple constructors"
@@ -1265,13 +1271,17 @@ entityPtrParamInfo typeSpec indexNames =
 --              Entity Items (Proc Declarations)
 ----------------------------------------------------------------
 
-entityGetLastResourceItem :: Visibility -> TypeSpec -> OptPos -> Item
-entityGetLastResourceItem vis typeSpec =
+entityGetResourceItem :: Visibility -> TypeSpec -> OptPos -> ResourceSpec -> Item
+entityGetResourceItem vis typeSpec pos resSpec = 
     ProcDecl vis (inlineModifiers (GetterProc procName typeSpec) Det)
-        (ProcProto procName [Unplaced $ Param outputVariableName typeSpec ParamOut Ordinary] $ Set.singleton $ ResourceFlowSpec lastEntityResourceSpec ParamIn)
-        [move (varGet lastEntityResourceName) $ varSet outputVariableName]
+        (ProcProto procName
+            [Unplaced $ Param outputVariableName typeSpec ParamOut Ordinary]
+            $ Set.singleton $ ResourceFlowSpec resSpec ParamIn)
+        [move (varGet resName) $ varSet outputVariableName]
+        pos
     where
-        procName = "get_#"
+        resName = resourceName resSpec
+        procName = entityGetterName resName
 
 -- | Generate constructor code for an entity
 entityCreateItem :: Visibility -> ProcName -> TypeSpec -> [Placed Param]
@@ -1300,10 +1310,10 @@ entityCreateItem vis entityName typeSpec params fields size pos keyNames =
          indexFieldInfos) = partitionFieldInfos fields
 
         keyResFlowSpecs =
-            flip ResourceFlowSpec ParamInOut . keyFieldResourceSpec . pointerName
+            flip ResourceFlowSpec ParamInOut . keyFieldResourceSpec
                 <$> keyNames
         indexResFlowSpecs =
-            flip ResourceFlowSpec ParamInOut . indexFieldResourceSpec . fldName
+            flip ResourceFlowSpec ParamInOut . indexFieldResourceSpec . unPointerName . fldName
                 <$> indexFieldInfos
         resList = ResourceFlowSpec dbResourceSpec ParamInOut
                     : ResourceFlowSpec lastEntityResourceSpec ParamInOut
@@ -1357,7 +1367,6 @@ entitySetItems vis etyType etySize modDict (FieldInfo fieldName pos _ fieldType 
         indexKeys = [key | IndexModifierInfo key <- modInfos]
         indexResFlowSpecs = flip ResourceFlowSpec ParamInOut
                             . indexFieldResourceSpec
-                            . pointerName
                             <$> indexKeys
         resList = ResourceFlowSpec dbResourceSpec ParamInOut : indexResFlowSpecs
         resList' = if List.null indexResFlowSpecs
@@ -1550,32 +1559,8 @@ inlineSemiDetModifiers = inlineModifiers RegularProc SemiDet
 --                           Symbols
 ----------------------------------------------------------------
 
-createName :: Ident
-createName = "create"
-
-getName :: Ident
-getName = "get"
-
-setName :: Ident
-setName = "set"
-
-pointerName :: VarName -> VarName
-pointerName = specialName
-
-entityCreateName :: ProcName
-entityCreateName = createName
-
-entityGetterName :: MergedAttrNames -> ProcName
-entityGetterName = entityProcName getName
-
-entitySetterName :: MergedAttrNames -> ProcName
-entitySetterName = entityProcName setName
-
 unplacedVarGetSetDb :: Placed Exp
 unplacedVarGetSetDb = Unplaced $ varGetSet dbResourceName Ordinary
-
-entityProcName :: Ident -> MergedAttrNames -> ProcName
-entityProcName command key = command ++ '_':key
 
 -- |The name of the variable holding a record
 recName :: Ident

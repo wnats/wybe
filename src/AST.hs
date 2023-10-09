@@ -122,6 +122,8 @@ module AST (
   cuckooResourceBaseName, cuckooModSpec,
   keyResourceBaseName, keyResourceName, keyFieldResourceSpec,
   indexResourceBaseName, indexResourceName, indexFieldResourceSpec,
+  pointerName, unPointerName,
+  entityCreateName, entityGetterName, entitySetterName,
   showBody, showPlacedPrims, showStmt, showBlock, showProcDef,
   showProcIdentifier, showProcName,
   showModSpec, showModSpecs, showResources, showOptPos, showProcDefs, showUse,
@@ -3043,8 +3045,7 @@ instance Show Stmt where
 -- |Produce a single statement comprising the conjunctions of the statements
 --  in the supplied list.
 seqToStmt :: [Placed Stmt] -> Placed Stmt
-seqToStmt [] = Unplaced $ TestBool
-               $ Typed (IntValue 1) AnyType $ Just $ TypeSpec ["wybe"] "bool" []
+seqToStmt [] = Unplaced Nop
 seqToStmt [stmt] = stmt
 seqToStmt stmts = Unplaced $ And stmts
 
@@ -3792,7 +3793,7 @@ keyResourceName = specialName2 keyResourceBaseName
 
 keyFieldResourceSpec :: VarName -> ResourceSpec
 keyFieldResourceSpec fieldName =
-    ResourceSpec [] $ keyResourceBaseName ++ fieldName
+    ResourceSpec [] $ keyResourceBaseName `specialName2` fieldName
 
 indexResourceBaseName :: Ident
 indexResourceBaseName = "index"
@@ -3802,7 +3803,37 @@ indexResourceName = specialName2 indexResourceBaseName
 
 indexFieldResourceSpec :: VarName -> ResourceSpec
 indexFieldResourceSpec fieldName =
-    ResourceSpec [] $ indexResourceBaseName ++ fieldName
+    ResourceSpec [] $ indexResourceBaseName `specialName2` fieldName
+
+createName :: Ident
+createName = "create"
+
+getName :: Ident
+getName = "get"
+
+setName :: Ident
+setName = "set"
+
+pointerName :: VarName -> VarName
+pointerName = specialName
+
+unPointerName :: VarName -> VarName
+unPointerName ptrName
+    | ptrName == "" = ptrName
+    | head ptrName == specialChar = tail ptrName
+    | otherwise = ptrName
+
+entityCreateName :: ProcName
+entityCreateName = createName
+
+entityGetterName :: MergedAttrNames -> ProcName
+entityGetterName = entityProcName getName
+
+entitySetterName :: MergedAttrNames -> ProcName
+entitySetterName = entityProcName setName
+
+entityProcName :: Ident -> MergedAttrNames -> ProcName
+entityProcName command key = command ++ '_':key
 
 ----------------------------------------------------------------
 --                      Showing Compiler State
