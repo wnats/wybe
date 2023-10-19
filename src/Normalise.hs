@@ -521,11 +521,14 @@ normaliseModMain = do
     modSpec <- getModuleSpec
     logNormalise $ "Completing main normalisation of module "
                    ++ showModSpec modSpec
-    resources <- initResources
     let initBody = List.reverse stmts
     logNormalise $ "Top-level statements = " ++ show initBody
-    unless (List.null stmts)
-      $ normaliseItem $ ProcDecl Public (setImpurity Semipure defaultProcModifiers)
+    unless (List.null stmts) $ do
+        resources <- initResources
+        logNormalise $ "Initialised resources in main code for module "
+                        ++ showModSpec modSpec
+                        ++ ": " ++ show resources
+        normaliseItem $ ProcDecl Public (setImpurity Semipure defaultProcModifiers)
                         (ProcProto "" [] resources) initBody Nothing
 
 
@@ -537,12 +540,18 @@ initResources = do
     thisMod <- getModule modSpec
     mods <- getModuleImplementationField (Map.keys . modImports)
     mods' <- (mods ++) . concat <$> mapM descendentModules mods
-    logNormalise $ "in initResources, mods = " ++ showModSpecs mods'
-    importedMods <- catMaybes <$> mapM getLoadingModule mods'
-    let importImplns = catMaybes (modImplementation <$> importedMods)
-    initialisedImports <- Set.toList . Set.unions . (Map.keysSet <$>)
-                          <$> mapM (initialisedResources `inModule`) mods'
-    initialisedLocal <- Set.toList . Map.keysSet <$> initialisedResources
+    logNormalise $ "in initResources for module " ++ showModSpec thisMod
+                   ++ ", mods = " ++ showModSpecs mods'
+    (localInitialised,visibleInitialised) <- initialisedResources
+    let visibleInitSet = Map.keysSet visibleInitialised
+    let localInitSet = Map.keysSet localInitialised
+    let importedInitSet = visibleInitSet Set.\\ localInitSet
+    logNormalise $ "in initResources, initialised resources = "
+                   ++ show visibleInitSet
+    logNormalise $ "            initialised local resources = "
+                   ++ show visibleInitSet
+    logNormalise $ "         initialised imported resources = "
+                   ++ show importedInitSet
     -- Direct tie-in to command_line library module:  for the command_line
     -- module, or any module that imports it, we add argc and argv as resources.
     -- This is necessary because argc and argv are effectively initialised by
@@ -556,18 +565,21 @@ initResources = do
                     ,ResourceFlowSpec (cmdline "argv") ParamInOut]
             else []
     let resources = cmdlineResources
-                    ++ ((`ResourceFlowSpec` ParamInOut) <$> initialisedImports)
-                    ++ ((`ResourceFlowSpec` ParamOut) <$> initialisedLocal)
+                    ++ ((`ResourceFlowSpec` ParamInOut)
+                         <$> Set.toList importedInitSet)
+                    ++ ((`ResourceFlowSpec` ParamOut)
+                        <$> Set.toList localInitSet)
     -- let inits = [ForeignCall "llvm" "move" []
     --                 [maybePlace ((content initExp) `withType` resType)
     --                     (place initExp)
     --                 , varSet (resourceName resSpec) `maybePlace` pos] 
     --                  `maybePlace` pos
-    --             | (resSpec, resImpln) <- initialisedLocal
+    --             | (resSpec, resImpln) <- localInitSet
     --             , let initExp = trustFromJust "initResources"
     --                             $ resourceInit resImpln
     --             , let resType = resourceType resImpln]
-    logNormalise $ "In initResources, resources = " ++ show resources
+    logNormalise $ "In initResources for module " ++ showModSpec thisMod
+                   ++ ", resources = " ++ show resources
     -- logNormalise $ "In initResources, initialisations =" ++ showBody 4 inits
     return (Set.fromList resources)
 

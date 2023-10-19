@@ -662,9 +662,9 @@ getSpecModule context getter spec = do
     let msg = context ++ " looking up module " ++ showModSpec spec
     underComp <- gets underCompilation
     let curr = List.filter ((==spec) . modSpec) underComp
-    logAST $ "Under compilation: " ++ showModSpecs (modSpec <$> underComp)
-    logAST $ "found " ++ show (length curr) ++
-      " matching modules under compilation"
+    -- logAST $ "Under compilation: " ++ showModSpecs (modSpec <$> underComp)
+    -- logAST $ "found " ++ show (length curr) ++
+    --   " matching modules under compilation"
     case curr of
         []    -> gets (maybe (error msg) getter . Map.lookup spec . modules)
         [mod] -> return $ getter mod
@@ -1773,8 +1773,11 @@ combineImportSpecs (ImportSpec pub1 priv1) (ImportSpec pub2 priv2) =
     ImportSpec (USet.union pub1 pub2) (USet.union priv1 priv2)
 
 
--- |Actually import into the current module.  The ImportSpec says what
--- to import.
+-- |Actually import the specified module into the current module.  The
+-- ImportSpec says what to import.  This is called after dependencies
+-- have been loaded and their imports have been handled.  The case of
+-- mutual dependencies is handled by repeating this until a fixed point
+-- is reached.
 doImport :: ModSpec -> (ImportSpec, InterfaceHash) -> Compiler ()
 doImport mod (imports, _) = do
     currMod <- getModuleSpec
@@ -1799,7 +1802,7 @@ doImport mod (imports, _) = do
     logAST $ "    importing resources: "
              ++ intercalate ", " (Map.keys importedResources)
     logAST $ "    importing procs    : "
-             ++ intercalate ", " (Map.keys importedProcs)
+             ++ intercalate ", " (showProcName <$> Map.keys importedProcs)
     -- XXX Must report error for imports of non-exported items
     let knownTypes = Map.unionWith Set.union (modKnownTypes impl)
                      $ Map.fromAscList
@@ -1933,16 +1936,33 @@ data ResourceImpln =
         resourceType::TypeSpec,
         resourceInit::Maybe (Placed Exp),
         resourcePos::OptPos
-        } deriving (Generic)
+        } deriving (Generic, Eq)
 
 
--- | A list of the initialised resources defined by the current module.
-initialisedResources :: Compiler ResourceDef
+-- | Return the initialised resources *defined* by the current module, and
+-- initialised resources *visible* in the current module.  The former are
+-- explicitly initialised by the current module's main proc, and the latter
+-- are usable there, so the former are out-only resources for it, and the
+-- latter are in/out.
+initialisedResources :: Compiler (ResourceDef,ResourceDef)
 initialisedResources = do
-    modRes <- getModuleImplementationField modResources
-    logAST $ "Getting initialised resources = " ++ show modRes
-    logAST $ "                       unions = " ++ show (Map.unions modRes)
-    return $ Map.filter (isJust . resourceInit) $ Map.unions modRes
+    currMod <- getModuleSpec
+    localRes <- getModuleImplementationField modResources
+    let localDefs = Map.filter (isJust . resourceInit) $ Map.unions localRes
+    visableRes <- Set.toList . Set.unions . Map.elems
+                 <$> getModuleImplementationField modKnownResources
+    visibleDefs <- Map.filter (isJust . resourceInit) . Map.unions . catMaybes
+               <$> mapM lookupResource visableRes
+    logAST $ "Getting initialised resources defined and visible in module "
+                ++ showModSpec currMod
+    logAST $ "      local resources = " ++ show localRes
+    logAST $ "    local initialised = " ++ show localDefs
+    logAST $ "    visible resources = " ++ show visableRes
+    logAST $ "  visible initialised = " ++ show visibleDefs
+    when (localDefs /= visibleDefs)
+      $ logAST $ "   NB:  different old initialised = " ++ show visibleDefs
+    return (localDefs,visibleDefs)
+
 
 -- |A proc definition, including the ID, prototype, the body,
 --  normalised to a list of primitives, and an optional source
