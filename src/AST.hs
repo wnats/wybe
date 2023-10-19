@@ -3806,11 +3806,11 @@ hashProcName = "hash"
 tabHashResourceSpec :: ResourceSpec
 tabHashResourceSpec = ResourceSpec hashModSpec "tab_hash"
 
-lastEntityResourceName :: String
-lastEntityResourceName = [specialChar]
+lastEntityResourceName :: ProcName -> String
+lastEntityResourceName = (specialChar:)
 
-lastEntityResourceSpec :: ResourceSpec
-lastEntityResourceSpec = ResourceSpec [] lastEntityResourceName
+lastEntityResourceSpec :: ProcName -> ResourceSpec
+lastEntityResourceSpec = ResourceSpec [] . lastEntityResourceName
 
 cuckooResourceBaseName :: Ident
 cuckooResourceBaseName = "cuckoo"
@@ -3821,22 +3821,20 @@ cuckooModSpec = [cuckooResourceBaseName]
 keyResourceBaseName :: Ident
 keyResourceBaseName = "key"
 
-keyResourceName :: MergedAttrNames -> ResourceName
-keyResourceName = specialName2 keyResourceBaseName
+keyResourceName :: ProcName -> MergedAttrNames -> ResourceName
+keyResourceName etyName = specialName2 etyName . specialName2 keyResourceBaseName
 
-keyFieldResourceSpec :: MergedAttrNames -> ResourceSpec
-keyFieldResourceSpec fieldName =
-    ResourceSpec [] $ keyResourceBaseName `specialName2` fieldName
+keyFieldResourceSpec :: ProcName -> MergedAttrNames -> ResourceSpec
+keyFieldResourceSpec etyName = ResourceSpec [] . keyResourceName etyName
 
 indexResourceBaseName :: Ident
 indexResourceBaseName = "index"
 
-indexResourceName :: MergedAttrNames -> ResourceName
-indexResourceName = specialName2 indexResourceBaseName
+indexResourceName :: ProcName -> MergedAttrNames -> ResourceName
+indexResourceName etyName = specialName2 etyName . specialName2 indexResourceBaseName
 
-indexFieldResourceSpec :: MergedAttrNames -> ResourceSpec
-indexFieldResourceSpec fieldName =
-    ResourceSpec [] $ indexResourceBaseName `specialName2` fieldName
+indexFieldResourceSpec :: ProcName -> MergedAttrNames -> ResourceSpec
+indexFieldResourceSpec etyName = ResourceSpec [] . indexResourceName etyName
 
 createName :: Ident
 createName = "create"

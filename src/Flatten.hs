@@ -512,7 +512,7 @@ lookupStrategy etyModSpec attrs pAttrArgs pos = do
         -- !<entity>.get_key#<attr>(?resTmp)
         flattenStmt
             (ProcCall (regularModProc etyModSpec $
-                       entityGetterName $ keyResourceName attr)
+                       entityGetterName $ keyResourceName (last etyModSpec) attr)
                       Det True [Unplaced $ varSet resTmp]) pos Det
         -- !cuckoo.lookup(resTmp,  get_<attr>, hash, `=`, <key>, ?#ety)
         flattenStmt (cuckooLookupProcCall resTmp attr arg entityVariableName) pos Det
@@ -525,7 +525,7 @@ lookupStrategy etyModSpec attrs pAttrArgs pos = do
         -- !<entity>.get_index#<attr>(?resTmp)
         flattenStmt
             (ProcCall (regularModProc etyModSpec $
-                       entityGetterName $ indexResourceName attr)
+                       entityGetterName $ indexResourceName (last etyModSpec) attr)
                       Det True [Unplaced $ varSet resTmp]) pos Det
         -- !cuckoo.lookup(resTmp,  get_<attr>, hash, `=`, <key>, ?#ety)
         flattenStmt (cuckooLookupProcCall resTmp attr arg entityVariableName) pos Det
@@ -538,14 +538,15 @@ lookupStrategy etyModSpec attrs pAttrArgs pos = do
     else do
         -- !<entity>.get_#(?#ety)
         flattenStmt
-            (ProcCall (regularModProc etyModSpec $
-                       entityGetterName lastEntityResourceName)
+            (ProcCall (regularModProc etyModSpec $ entityGetterName
+                        $ lastEntityResourceName $ last etyModSpec)
                       Det True [Unplaced $ varSet etyTmp]) pos Det
         -- !<ety>.get_#(#ety, ?#ety)
         return
             $ Unplaced
                 $ ProcCall
-                    (regularModProc etyModSpec $ entityGetterName lastEntityResourceName)
+                    (regularModProc etyModSpec $ entityGetterName
+                        $ lastEntityResourceName $ last etyModSpec)
                     Det True [Unplaced $ varGet etyTmp, Unplaced $ varSet etyTmp]
     where
         isKey attr (KeyModifierInfo infoAttr) = infoAttr == attr
