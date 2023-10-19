@@ -42,6 +42,7 @@ import Config
 import Debug.Trace
 import Snippets
 import Options (LogSelection(Flatten))
+import Data.Function (on)
 import Data.Map as Map
 import Data.Set as Set
 import Data.List as List
@@ -369,46 +370,12 @@ flattenStmt' (Loop body defVars res) pos detism = do
     body' <- flattenInner False detism (flattenStmts body detism)
     emit pos $ Loop body' defVars res
 flattenStmt' for@(For pgens body) pos detism = do
-    -- For loops are transformed into `do` loops
-    -- E.g. for i in x, j in y {
-    --          <stmts>
-    --      }
-    -- will be transformed into
-    -- ?temp1 = x
-    -- ?temp2 = y
-    -- do {
-    --     if { `[|]`(?i, ?temp1, temp1) ::
-    --          if { `[|]`(?j, ?temp2, temp2) ::
-    --              <stmts>
-    --          | else :: break
-    --          }
-    --     | else :: break
-    --     }
-    -- }
     logFlatten $ "Generating for " ++ showStmt 4 for
-    let (gens, poss) = unzip $ unPlace <$> pgens
-    temps <- mapM (const tempVar) gens
-    -- XXX Should check for input only
-    origs <- mapM (flattenPExp . genExp) gens
-    let instrs = zipWith (\orig temp ->
-                            ForeignCall "llvm" "move" []
-                                [orig, Unplaced $ varSet temp])
-                    origs temps
-    mapM_ (emit pos) instrs
-    modify (\s -> s {defdVars = Set.union (Set.fromList temps) $ defdVars s})
-    let loop = List.foldr
-                (\(var, gen, pos') loop ->
-                    [Unplaced $ Cond (ProcCall (regularProc "[|]") SemiDet False
-                                        [var,
-                                         Unplaced $ Var gen ParamOut Ordinary,
-                                         Unplaced $ Var gen ParamIn Ordinary]
-                                      `maybePlace` pos')
-                                loop [Unplaced Break]
-                      Nothing Nothing Nothing]
-                ) body $ zip3 (loopVar <$> gens) temps poss
-    let generated = Loop loop Nothing Nothing
+    loopTranss <- mapM flattenGenerator pgens
+    let loop = List.foldr ($) body loopTranss
+        generated = Loop loop Nothing Nothing
     logFlatten $ "Generated for: " ++ showStmt 4 generated
-    flattenStmt' generated pos detism
+    flattenStmt generated pos detism
 flattenStmt' (UseResources res vars body) pos detism = do
     oldVars <- gets defdVars
     mapM_ (noteVarIntro . resourceName) res
@@ -430,6 +397,223 @@ flattenDisj detism (disj:disjs) = do
     disjs' <- flattenDisj detism disjs
     return $ disj' : disjs'
 
+flattenGenerator :: Placed Generator -> Flattener ([Placed Stmt] -> [Placed Stmt])
+flattenGenerator gen = uncurry flattenGenerator' $ unPlace gen
+
+flattenGenerator' :: Generator -> OptPos -> Flattener ([Placed Stmt] -> [Placed Stmt])
+flattenGenerator' (In x xs) pos = do
+    -- For loops are transformed into `do` loops
+    -- E.g. for i in x, j in y {
+    --          <stmts>
+    --      }
+    -- will be transformed into
+    -- ?temp1 = x
+    -- ?temp2 = y
+    -- do {
+    --     if { `[|]`(?i, ?temp1, temp1) ::
+    --          if { `[|]`(?j, ?temp2, temp2) ::
+    --              <stmts>
+    --          | else :: break
+    --          }
+    --     | else :: break
+    --     }
+    -- }
+    tmp <- tempVar
+    orig <- flattenPExp xs
+    -- foreign llvm move(x, ?tmp)
+    emit pos $ ForeignCall "llvm" "move" [] [orig, Unplaced $ varSet tmp]
+    noteVarIntro tmp
+    
+    return
+        $ \body ->
+            (:[]) . Unplaced
+                $ Cond
+                    (ProcCall (regularProc "[|]") SemiDet False
+                        [x, Unplaced $ varSet tmp, Unplaced $ varGet tmp]
+                        `maybePlace` pos)
+                    body [Unplaced Break] Nothing Nothing Nothing
+flattenGenerator' (Lookup call) pos = do
+    unless (isProcCall $ content call)
+        $ shouldnt "Lookup call should be a ProcCall. This should've been caught in Parser.hs"
+
+    let ProcCall (First modSpec name _) _ resourceful args = content call
+        etyModSpec = modSpec ++ [name]
+        etyTmp = entityVariableName
+    
+    unless resourceful
+        $ lift $ errmsg pos "Lookup generators must be resourceful"
+
+    -- Check valid argument length    
+    (_, etyProto) <- lift $ trustFromJust
+                                ("Entity " ++ showModSpec etyModSpec ++ "does not exist")
+                            . modEntity
+                            <$> getLoadedModuleImpln etyModSpec
+    let attrs = paramName . content <$> procProtoParams (content etyProto)
+        expArgsLen = length attrs + 1
+        argsLen = length args
+    unless (expArgsLen == argsLen)
+        $ lift $ errmsg pos 
+                    $ "Lookup expected " ++ show expArgsLen
+                    ++ " arguments, but received " ++ show argsLen
+                    ++ " arguments."
+    
+    -- Check last argument flows out
+    let (pAttrArgs, pEtyArg) = (init args, last args)
+        etyArg = content pEtyArg
+    unless (expIsVar etyArg)
+        $ lift $ errmsg (place pEtyArg)
+                    "Last argument of a lookup needs to be FlowOut"
+
+    let etyVar = Set.findMin $ expOutputs etyArg
+    noteVarIntro etyTmp
+
+        -- foreign lpvm cast(#ety):count ~= 0:count
+    let breakTest = Unplaced
+                    $ ProcCall (regularProc "~=") SemiDet False
+                        [Unplaced $ ForeignFn "lpvm" "cast" [] [Unplaced $ varGet etyTmp] `withType` countType,
+                         Unplaced $ iVal 0 `withType` countType]
+
+        -- foreign llvm move(#ety, ?<ety>)
+        movTmpEty = move (varGet etyTmp) $ varSet etyVar
+
+    getNext <- lookupStrategy etyModSpec attrs pAttrArgs pos
+    (mbGetters, mbFilters) <- unzip <$> zipWithM (lookupGetterFilter etyModSpec etyVar) attrs pAttrArgs
+    let (getters, filters) =  ((,) `on` catMaybes) mbGetters mbFilters
+        filterCond body = Unplaced $ Cond (seqToStmt filters) body
+                            [Unplaced Next] Nothing Nothing Nothing
+
+    return
+        $ \body ->
+            (:[]) . Unplaced
+                $ Cond breakTest
+                    ((movTmpEty:getNext:getters)
+                    ++ [filterCond body])
+                    [Unplaced Break] Nothing Nothing Nothing
+
+    where
+        isProcCall ProcCall{} = True
+        isProcCall _ = False
+
+lookupStrategy :: ModSpec -> [VarName] -> [Placed Exp] -> OptPos -> Flattener (Placed Stmt)
+lookupStrategy etyModSpec attrs pAttrArgs pos = do
+    modDict <- lift $ trustFromJust "lookupInitNext"
+                        . modEntityModDict <$> getLoadedModuleImpln etyModSpec
+    let inAttrArgs = List.filter (Set.null . expOutputs . content . snd) $ zip attrs pAttrArgs
+        mbKeyAttrArg = List.find (liftM2 any isKey (\k -> Map.findWithDefault [] k modDict) . fst) inAttrArgs
+        mbIndexAttrArg = List.find (liftM2 any isIndex (\k -> Map.findWithDefault [] k modDict) . fst) inAttrArgs
+        nullEty = ForeignFn "lpvm" "cast" [] [Unplaced $ iVal 0]
+        etyTmp = entityVariableName
+    -- Lookout for key
+    if isJust mbKeyAttrArg
+    then do
+        let (attr, arg) = trustFromJust "lookupStrategy: Key" mbKeyAttrArg
+        resTmp <- tempVar
+        noteVarIntro resTmp
+        -- !<entity>.get_key#<attr>(?resTmp)
+        flattenStmt
+            (ProcCall (regularModProc etyModSpec $
+                       entityGetterName $ keyResourceName attr)
+                      Det True [Unplaced $ varSet resTmp]) pos Det
+        -- !cuckoo.lookup(resTmp,  get_<attr>, hash, `=`, <key>, ?#ety)
+        flattenStmt (cuckooLookupProcCall resTmp attr arg entityVariableName) pos Det
+        -- Set #ety to null
+        return $ move nullEty (varSet etyTmp) 
+    else if isJust mbIndexAttrArg
+    then do
+        let (attr, arg) = trustFromJust "lookupStrategy: Index" mbIndexAttrArg
+        resTmp <- tempVar
+        -- !<entity>.get_index#<attr>(?resTmp)
+        flattenStmt
+            (ProcCall (regularModProc etyModSpec $
+                       entityGetterName $ indexResourceName attr)
+                      Det True [Unplaced $ varSet resTmp]) pos Det
+        -- !cuckoo.lookup(resTmp,  get_<attr>, hash, `=`, <key>, ?#ety)
+        flattenStmt (cuckooLookupProcCall resTmp attr arg entityVariableName) pos Det
+        -- !get_#<attr>(#ety, ?#ety)
+        return
+            $ Unplaced
+                $ ProcCall
+                    (regularModProc etyModSpec $ entityGetterName $ pointerName attr)
+                    Det True [Unplaced $ varGet etyTmp, Unplaced $ varSet etyTmp]
+    else do
+        -- !<entity>.get_#(?#ety)
+        flattenStmt
+            (ProcCall (regularModProc etyModSpec $
+                       entityGetterName lastEntityResourceName)
+                      Det True [Unplaced $ varSet etyTmp]) pos Det
+        -- !<ety>.get_#(#ety, ?#ety)
+        return
+            $ Unplaced
+                $ ProcCall
+                    (regularModProc etyModSpec $ entityGetterName lastEntityResourceName)
+                    Det True [Unplaced $ varGet etyTmp, Unplaced $ varSet etyTmp]
+    where
+        isKey attr (KeyModifierInfo infoAttr) = infoAttr == attr
+        isKey _ _ = False
+
+        isIndex attr (IndexModifierInfo infoAttr) = infoAttr == attr
+        isIndex _ _ = False
+
+cuckooLookupProcCall :: VarName -> VarName -> Placed Exp -> VarName -> Stmt
+cuckooLookupProcCall resVar attr key etyOut =
+    -- !cuckoo.lookup(<resVar>,  get_<attr>, hash, `=`, <key>, ?#ety)
+    ProcCall (regularModProc cuckooModSpec "lookup") Det True
+        [Unplaced $ varGet resVar,
+         Unplaced $ varGet $ entityGetterName attr,
+         Unplaced $ varGet hashProcName,
+         Unplaced $ varGet "=",
+         key,
+         Unplaced $ varSet etyOut
+        ]
+
+-- | Returns !get_first(<ety>, ?#first) and #first = first (TODO: prettify this comment)
+lookupGetterFilter :: ModSpec -> VarName -> VarName -> Placed Exp -> Flattener (Maybe (Placed Stmt), Maybe (Placed Stmt))
+lookupGetterFilter etyModSpec etyVar attr pArg
+    -- DON'T CARE
+    | expOuts == Set.singleton "_" = return (Nothing, Nothing)
+    -- IN
+    | Set.null expOuts = do
+        attrTmp <- tempVar
+        noteVarIntro attrTmp
+        return (Just $ getAttr attrTmp, Just $ filterAttr attrTmp)
+    -- OUT
+    | otherwise = do
+        when (Set.size expOuts /= 1)
+            $ lift $ errmsg (place pArg) "Expected one outflow at each lookup field"
+        return (Just $ getAttr $ Set.findMin expOuts, Nothing)
+    where
+        expOuts = expOutputs $ content pArg
+        getAttr attrVar = Unplaced
+                            $ ProcCall
+                                (regularModProc etyModSpec $ entityGetterName attr)
+                                Det True
+                                [Unplaced $ varGet etyVar,
+                                 Unplaced $ varSet attrVar]
+        filterAttr attrVar = Unplaced
+                                $ ProcCall (regularProc "=") SemiDet False
+                                    [Unplaced $ varGet attrVar, pArg]
+
+
+
+
+    -- TODO: Check for indicies
+    -- foreign llvm move(x, ?tmp)
+    -- tmp <- tempVar
+    -- orig <- flattenPExp xs
+    -- emit pos $ ForeignCall "llvm" "move" [] [orig, Unplaced $ varSet tmp]
+    -- modify (\s -> s {defdVars = Set.insert tmp $ defdVars s})
+
+
+-- flattenGenerator :: Placed Generator -> Flattener (Placed Stmt, [Placed Stmt])
+-- flattenGenerator gen = uncurry flattenGenerator' $ unPlace gen
+
+-- flattenGenerator' :: Generator -> OptPos -> Flattener (Placed Stmt, [Placed Stmt])
+-- flattenGenerator' (In x xs) pos = do
+--     temp <- tempVar
+--     origs =flattenPExp xs
+--     nyi "not yet"
+
+-- flattenGenerator' _ _ = undefined
 
 -- | Flatten an assignment of the specified expression (`value`) to the
 -- specified variable, which is specified both as a name and as an output

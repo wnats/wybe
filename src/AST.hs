@@ -28,8 +28,11 @@ module AST (
   VarDict, TypeImpln(..),
   ProcProto(..), Param(..), TypeFlow(..),
   paramTypeFlow, primParamTypeFlow, setParamArgFlowType,
-  paramToVar, primParamToArg, unzipTypeFlow, unzipTypeFlows,
+  paramToVar, placedParamToVar, primParamToArg, unzipTypeFlow, unzipTypeFlows,
   PrimProto(..), PrimParam(..), ParamInfo(..),
+  EntityModifier(..), EntityModifierType(..),
+  MergedAttrNames, EntityModifierInfo(..), EntityModifierDict,
+  mergeAttrNames, unMergeAttrNames, buildEntityModifierDict,
   Exp(..), StringVariant(..), GlobalInfo(..), Generator(..), Stmt(..), ProcFunctor(..),
   regularProc, regularModProc,
   flattenedExpFlow, expIsVar, expIsConstant, expVar, expVar', maybeExpType, innerExp,
@@ -87,7 +90,7 @@ module AST (
   CompilerState(..), Compiler, runCompiler,
   updateModules, updateImplementations, updateImplementation,
   updateTypeModifiers,
-  addParameters, addTypeRep, setTypeRep, addConstructor,
+  addParameters, addTypeRep, setTypeRep, addConstructor, addEntity,
   getModuleImplementationField, getModuleImplementation,
   getLoadedModule, getLoadingModule, updateLoadedModule, updateLoadedModuleM,
   getLoadedModuleImpln, updateLoadedModuleImpln, updateLoadedModuleImplnM,
@@ -112,6 +115,15 @@ module AST (
   specialChar, specialName, specialName2,
   outputVariableName, outputStatusName,
   envParamName, envPrimParam, makeGlobalResourceName,
+  entityVariableName,
+  dbResourceName, dbResourceSpec,
+  hashModSpec, hashProcName, tabHashResourceSpec,
+  lastEntityResourceName, lastEntityResourceSpec,
+  cuckooResourceBaseName, cuckooModSpec,
+  keyResourceBaseName, keyResourceName, keyFieldResourceSpec,
+  indexResourceBaseName, indexResourceName, indexFieldResourceSpec,
+  pointerName, unPointerName,
+  entityCreateName, entityGetterName, entitySetterName,
   showBody, showPlacedPrims, showStmt, showBlock, showProcDef,
   showProcIdentifier, showProcName,
   showModSpec, showModSpecs, showResources, showOptPos, showProcDefs, showUse,
@@ -181,6 +193,7 @@ data Item
        -- The Bool in the next two indicates whether inlining is forced
      | FuncDecl Visibility ProcModifiers ProcProto TypeSpec (Placed Exp) OptPos
      | ProcDecl Visibility ProcModifiers ProcProto [Placed Stmt] OptPos
+     | EntityDecl Visibility (Placed ProcProto) [EntityModifier] OptPos
      | StmtDecl Stmt OptPos
      | PragmaDecl Pragma
      deriving (Generic, Eq)
@@ -905,6 +918,34 @@ addConstructor vis pctor = do
     updateModule (\m -> m { modIsType  = True })
     addKnownType currMod
 
+addEntity :: Visibility -> Placed ProcProto -> [EntityModifier] -> Compiler ()
+addEntity vis placedEntityProto entityModifiers = do
+    let pos = place placedEntityProto
+        entityProto = content placedEntityProto
+    currMod <- getModuleSpec
+    hasRepn <- isJust <$> getModule modTypeRep
+    when hasRepn
+      $ errmsg pos
+           $ "Declaring entity for type " ++ showModSpec currMod
+           ++ " with declared representation"
+    ctors <- fromMaybe [] <$> getModuleImplementationField modConstructors
+    unless (List.null ctors)
+      $  errmsg pos
+           $ "Declaring entity for type " ++ showModSpec currMod
+           ++ " with declared constructor(s)"
+    updateImplementation (\m -> m { modEntity = Just (vis, placedEntityProto) })
+    updateImplementation (\m -> m { modEntityModDict = Just
+                            $ buildEntityModifierDict entityModifiers })
+    updateModule (\m -> m { modIsType = True })
+
+    -- Import prerequisite libraries
+    let defaultImports = [dbModSpec]
+        cuckooImports = [hashModSpec, cuckooModSpec]
+        imports = if List.null entityModifiers then defaultImports
+                  else defaultImports ++ cuckooImports
+    mapM_ (flip addImport $ importSpec Nothing Public) imports
+
+    addKnownType currMod
 
 -- |Record that the specified type is known in the current module.
 addKnownType :: ModSpec -> Compiler ()
@@ -1577,6 +1618,9 @@ data ModuleImplementation = ModuleImplementation {
                                               -- ^reversed list of data
                                               -- constructors for this
                                               -- type, if it is a type
+    modEntity :: Maybe (Visibility, Placed ProcProto),
+    modEntityModDict :: Maybe EntityModifierDict,
+    modEntityResources :: Maybe (Set ResourceSpec),
     modKnownTypes:: Map Ident (Set ModSpec),  -- ^Types visible to this module
     modKnownResources :: Map Ident (Set ResourceSpec),
                                               -- ^Resources visible to this mod
@@ -1589,8 +1633,8 @@ data ModuleImplementation = ModuleImplementation {
 emptyImplementation :: ModuleImplementation
 emptyImplementation =
     ModuleImplementation Set.empty Map.empty Nothing Map.empty Map.empty
-                         Map.empty Nothing Map.empty Map.empty Map.empty
-                         Set.empty Set.empty Nothing
+                         Map.empty Nothing Nothing Nothing Nothing Map.empty
+                         Map.empty Map.empty Set.empty Set.empty Nothing
 
 
 -- These functions hack around Haskell's terrible setter syntax
@@ -1836,10 +1880,12 @@ importsSelected imports items =
 
 -- | Pragmas that can be specified for a module
 data Pragma = NoStd        -- ^ Don't import that standard library for this mod
+            | AddSimpleResource
    deriving (Eq,Ord,Generic)
 
 instance Show Pragma where
     show NoStd = "no_standard_library"
+    show AddSimpleResource = "add_simple_resource"
 
 
 -- |Specify a pragma for the current module
@@ -2474,13 +2520,21 @@ foldStmt' _   _   val Nop pos = val
 foldStmt' _   _   val Fail pos = val
 foldStmt' sfn efn val (Loop body _ _) pos = foldStmts sfn efn val body
 foldStmt' sfn efn val (UseResources _ _ body) pos = foldStmts sfn efn val body
-foldStmt' sfn efn val (For generators body) pos = val3
-    where val1 = foldExps sfn efn pos val  $ loopVar . content <$> generators
-          val2 = foldExps sfn efn pos val1 $ genExp  . content <$> generators
-          val3 = foldStmts sfn efn val2 body
+foldStmt' sfn efn val (For generators body) pos = val2
+    where val1 = List.foldl (\acc pgen -> defaultPlacedApply (foldGenerator sfn efn acc) pos pgen) val generators
+          val2 = foldStmts sfn efn val1 body
 foldStmt' _ _ val Break pos = val
 foldStmt' _ _ val Next pos = val
 
+foldGenerator :: (a -> Stmt -> OptPos -> a) -> (a -> Exp -> OptPos -> a) -> a
+              -> Generator -> OptPos -> a
+foldGenerator sfn efn val (In x xs) pos = val2
+    where val1 = foldExps sfn efn pos val [x]
+          val2 = foldExps sfn efn pos val1 [xs]
+foldGenerator sfn efn val (Lookup pStmt) pos =
+    case content pStmt of
+        procCall@ProcCall{} -> foldStmt sfn efn val procCall pos
+        _ -> shouldnt "Lookup call should be a ProcCall. This should've been caught in Parser.hs"
 
 -- |Fold over a list of expressions in a pre-order left-to-right traversal.
 -- Takes two folding functions, one for statements and one for expressions, plus
@@ -2743,6 +2797,54 @@ instance Show PrimProto where
         name ++ "(" ++ intercalate ", " (List.map show params) ++ ")"
              ++ show gFlows
 
+-- | An entity's modifier
+data EntityModifier = EntityModifier {
+    entityModifierAttr :: [VarName],
+    entityModifierType :: EntityModifierType
+} deriving (Eq, Generic, Show)
+
+-- | Modifier type for an entity's attribtue (is the attribute a key or index?)
+--   Can add more modifiers in the future
+data EntityModifierType = Key | Index deriving (Show, Generic, Ord, Eq)
+
+-- | e.g. first + last = #first#last
+type MergedAttrNames = VarName
+
+mergeString :: Ident
+mergeString = [specialChar]
+
+-- | Combine attribute names
+mergeAttrNames :: [VarName] -> MergedAttrNames
+mergeAttrNames = intercalate mergeString
+
+-- | Uncombine attribute names
+unMergeAttrNames :: MergedAttrNames -> [VarName]
+unMergeAttrNames = splitOn mergeString  
+
+data EntityModifierInfo
+    = KeyModifierInfo MergedAttrNames
+    | IndexModifierInfo MergedAttrNames
+    deriving (Eq, Show, Generic)
+
+buildEntityModifierInfo :: EntityModifier -> EntityModifierInfo
+buildEntityModifierInfo (EntityModifier attrs modType) =
+    case modType of
+        Key -> KeyModifierInfo mergedAttrs
+        Index -> IndexModifierInfo mergedAttrs
+    where
+        mergedAttrs = mergeAttrNames attrs
+
+-- | Maps attr name to a list of related entity modifiers
+type EntityModifierDict = Map Ident [EntityModifierInfo]
+
+buildEntityModifierDict :: [EntityModifier] -> EntityModifierDict
+buildEntityModifierDict entityMods =
+    Map.fromListWith (++)
+    $ List.concatMap
+        (\mod@(EntityModifier attrs _) ->
+            (, [buildEntityModifierInfo mod]) <$> attrs
+        )
+        entityMods
 
 -- |A formal parameter, including name, type, and flow direction.
 data Param = Param {
@@ -2833,6 +2935,12 @@ paramToVar :: Param -> Placed Exp
 paramToVar (Param n t f ft)
     = Unplaced $ Typed (Var n f ft) t Nothing
 
+-- | Convert a Placed Param to an equivalent Var placed in the same position
+placedParamToVar :: Placed Param ->  Placed Exp
+placedParamToVar pParam =
+    Typed (Var name flow flowType) typeSpec Nothing `maybePlace` pos
+    where
+        (Param name typeSpec flow flowType, pos) = unPlace pParam
 
 -- |Convert a PrimParam to a PrimArg
 primParamToArg :: PrimParam -> PrimArg
@@ -2950,8 +3058,7 @@ instance Show Stmt where
 -- |Produce a single statement comprising the conjunctions of the statements
 --  in the supplied list.
 seqToStmt :: [Placed Stmt] -> Placed Stmt
-seqToStmt [] = Unplaced $ TestBool
-               $ Typed (IntValue 1) AnyType $ Just $ TypeSpec ["wybe"] "bool" []
+seqToStmt [] = Unplaced Nop
 seqToStmt [stmt] = stmt
 seqToStmt stmts = Unplaced $ And stmts
 
@@ -3190,7 +3297,17 @@ isProcProtoArg _ _ = False
 data Generator
       = In { loopVar :: Placed Exp,  -- ^ The variable holding each value
              genExp :: Placed Exp -- ^ The generator being looped over
+        } 
+      | Lookup {
+            entityLookupCall :: Placed Stmt  -- ^ Must be a ProcCall
         } deriving (Eq,Ord,Generic)
+
+instance Show Generator where
+    show (In var gen) = show var ++ " in " ++ show gen
+    show (Lookup stmt) =
+        case content stmt of
+            ProcCall{} -> showStmt 0 $ content stmt
+            _ -> shouldnt "Non-proccall generators"
 
 -- |A variable name in SSA form, ie, a name and an natural number suffix,
 --  where the suffix is used to specify which assignment defines the value.
@@ -3643,6 +3760,94 @@ envPrimParam = PrimParam envParamName AnyType FlowIn Ordinary (ParamInfo False e
 makeGlobalResourceName :: ResourceSpec -> String
 makeGlobalResourceName spec = specialName2 "resource" $ show spec
 
+
+----------------------------------------------------------------
+--                 Entity symbols and resources
+----------------------------------------------------------------
+-- | Special variable name to hold an entity
+entityVariableName :: String
+entityVariableName = specialName "ety"
+
+dbResourceName :: Ident
+dbResourceName = "db"
+
+dbModSpec :: ModSpec
+dbModSpec = [dbResourceName]
+
+dbResourceSpec :: ResourceSpec
+dbResourceSpec = ResourceSpec dbModSpec dbResourceName
+
+hashModSpec :: ModSpec
+hashModSpec = ["hash"]
+
+hashProcName :: ProcName
+hashProcName = "hash"
+
+tabHashResourceSpec :: ResourceSpec
+tabHashResourceSpec = ResourceSpec hashModSpec "tab_hash"
+
+lastEntityResourceName :: String
+lastEntityResourceName = [specialChar]
+
+lastEntityResourceSpec :: ResourceSpec
+lastEntityResourceSpec = ResourceSpec [] lastEntityResourceName
+
+cuckooResourceBaseName :: Ident
+cuckooResourceBaseName = "cuckoo"
+
+cuckooModSpec :: ModSpec
+cuckooModSpec = [cuckooResourceBaseName]
+
+keyResourceBaseName :: Ident
+keyResourceBaseName = "key"
+
+keyResourceName :: MergedAttrNames -> ResourceName
+keyResourceName = specialName2 keyResourceBaseName
+
+keyFieldResourceSpec :: MergedAttrNames -> ResourceSpec
+keyFieldResourceSpec fieldName =
+    ResourceSpec [] $ keyResourceBaseName `specialName2` fieldName
+
+indexResourceBaseName :: Ident
+indexResourceBaseName = "index"
+
+indexResourceName :: MergedAttrNames -> ResourceName
+indexResourceName = specialName2 indexResourceBaseName
+
+indexFieldResourceSpec :: MergedAttrNames -> ResourceSpec
+indexFieldResourceSpec fieldName =
+    ResourceSpec [] $ indexResourceBaseName `specialName2` fieldName
+
+createName :: Ident
+createName = "create"
+
+getName :: Ident
+getName = "get"
+
+setName :: Ident
+setName = "set"
+
+pointerName :: VarName -> VarName
+pointerName = specialName
+
+unPointerName :: VarName -> VarName
+unPointerName ptrName
+    | ptrName == "" = ptrName
+    | head ptrName == specialChar = tail ptrName
+    | otherwise = ptrName
+
+entityCreateName :: ProcName
+entityCreateName = createName
+
+entityGetterName :: MergedAttrNames -> ProcName
+entityGetterName = entityProcName getName
+
+entitySetterName :: MergedAttrNames -> ProcName
+entitySetterName = entityProcName setName
+
+entityProcName :: Ident -> MergedAttrNames -> ProcName
+entityProcName command key = command ++ '_':key
+
 ----------------------------------------------------------------
 --                      Showing Compiler State
 --
@@ -3735,6 +3940,11 @@ instance Show Item where
     ++ " {"
     ++ showBody 4 stmts
     ++ "\n  }"
+  show (EntityDecl vis entityProto entityModifiers pos) =
+    visibilityPrefix vis
+    ++ show entityProto
+    ++ show entityModifiers
+    ++ showOptPos pos
   show (StmtDecl stmt pos) =
     showStmt 4 stmt ++ showOptPos pos
   show (PragmaDecl prag) =
@@ -3927,6 +4137,17 @@ instance Show PrimParam where
       in  pre ++ show ft ++ primFlowPrefix dir ++ show name
           ++ showTypeSuffix typ Nothing ++ flowStr ++ post
 
+-- instance Show EntityProto where
+--     show (EntityProto name attrs) =
+--         name ++ "(" ++ intercalate ", " (List.map show attrs) ++ ")"
+
+-- instance Show EntityAttr where
+--     show (EntityAttr name typ modifiers) =
+--         name ++ showTypeSuffix typ Nothing ++ maybeModifiers
+--             where
+--                 maybeModifiers
+--                     | Set.null modifiers = ""
+--                     | otherwise          = "{" ++ show modifiers ++ "}"
 
 -- |Show the type of an expression, if it's known.
 showTypeSuffix :: TypeSpec -> Maybe TypeSpec -> String
@@ -4064,8 +4285,7 @@ showStmt _ Fail = "fail"
 showStmt _ Nop = "pass"
 showStmt indent (For generators body) =
   "for "
-    ++ intercalate ", " [show var ++ " in " ++ show gen
-                        | (In var gen) <- content <$> generators]
+    ++ intercalate ", " (show . content <$> generators)
     ++ "{\n"
     ++ showBody (indent + 4) body
     ++ "\n}"

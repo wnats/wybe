@@ -9,6 +9,26 @@ pub def set_random_seed(s:int) use ?random {
     foreign c srand(s, ?random)
 }
 
+# Generate a random number between 0 and 2^64 - 1
+# Makes a conservative assumption that C's RAND_MAX is 15 bits
+pub def random(?n:count) use !random {
+    ?n = 0:count
+    foreign c rand(?x0:count, !random)
+    ?n = xor(n, and(x0, 32767:count)) << 15:count
+
+    foreign c rand(?x1:count, !random)
+    ?n = xor(n, and(x1, 32767:count)) << 15:count
+
+    foreign c rand(?x2:count, !random)
+    ?n = xor(n, and(x2, 32767:count)) << 15:count
+
+    foreign c rand(?x3:count, !random)
+    ?n = xor(n, and(x3, 32767:count)) << 15:count
+
+    foreign c rand(?x4:count, !random)
+    ?n = xor(n, and(x4, 32767:count))
+}
+
 # Generate a random number
 pub def random(?n:int) use !random {
     foreign c rand(?n, !random)

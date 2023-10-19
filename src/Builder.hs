@@ -220,7 +220,8 @@ import           Options                   (LogSelection (..), Options (..),
 import           Parser                    (parseWybe)
 import           Resources                 (resourceCheckMod,
                                             transformProcResources,
-                                            canonicaliseProcResources)
+                                            canonicaliseProcResources,
+                                            monkeyPatchEntityResources)
 import           Unique                    ( uniquenessCheckProc )
 import           Scanner                   (fileTokens)
 import           System.Directory
@@ -809,6 +810,7 @@ compileModSCC mspecs = do
     -- Fixed point needed because eventually resources can bundle
     -- resources from other modules
     fixpointProcessSCC resourceCheckMod mspecs
+    mapM_ (transformModuleProcs monkeyPatchEntityResources) mspecs
     mapM_ (transformModuleProcs canonicaliseProcResources)  mspecs
     stopOnError $ "processing resources for module(s) " ++ showModSpecs mspecs
     typeCheckModSCC mspecs
@@ -935,6 +937,10 @@ isStdLib :: ModSpec -> Bool
 isStdLib []    = False
 isStdLib (m:_) = m == "wybe"
 
+-- | Filter for avoiding the command line module, which is currently hardcoded
+--   into the executable module
+isCmdLine :: ModSpec -> Bool
+isCmdLine = (==["command_line"])
 
 -- |A Processor processes the specified module one iteration in a
 --  context of mutual dependency among the list of modules.  It

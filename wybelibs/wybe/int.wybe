@@ -76,6 +76,11 @@ pub def logical_bitshift(x:_, s:_):_ = foreign llvm lshr(x, s)
 # Logical bit-shift right (pad with zeroes) assignment.
 pub def logical_bitshift(!x:_, s:_) { ?x = logical_bitshift(x, s) }
 
+# Bit-wise xor.
+pub def xor(x:_, y:_):_ = foreign llvm xor(x, y)
+
+# Bit-wise and.
+pub def and(x:_, y:_):_ = foreign llvm and(x, y)
 
 ## Comparisons
 

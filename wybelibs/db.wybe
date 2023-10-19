@@ -1,0 +1,4 @@
+# purpose: Storing entities and relationships
+# since  : 0.1
+
+pub resource db:phantom = 0:phantom

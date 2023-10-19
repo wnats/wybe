@@ -13,6 +13,9 @@ module Parser where
 import AST hiding (option)
 import Data.Set as Set
 import Data.List as List
+import Data.Map as Map
+import Data.Function
+import Data.Bifunctor as Bifunctor
 import Data.Maybe as Maybe
 import Data.Bits
 import Data.Either.Extra (mapLeft)
@@ -86,6 +89,7 @@ visibilityItem = do
         <|> resourceItem v
         <|> useItemParser v
         <|> fromUseItemParser v
+        <|> entityItemParser v
     <?> "top-level item"
 
 
@@ -102,7 +106,8 @@ pragmaItem = ident "pragma" *> (PragmaDecl <$> parsePragma)
 -- TODO:  Should use the Term parser to parse the declaration body.
 -- | Parse a Pragma, currently only "no_standard_library"
 parsePragma :: Parser Pragma
-parsePragma = ident "no_standard_library" $> NoStd
+parsePragma = (ident "no_standard_library" $> NoStd)
+                <|> (ident "add_simple_resource" $> AddSimpleResource)
 
 
 -- | Module item parser.
@@ -274,6 +279,13 @@ flowDirection :: Parser FlowDirection
 flowDirection =
     option ParamIn $ symbol "?" $> ParamOut <|> symbol "!" $> ParamInOut
 
+-- | Parse an entity declaration
+entityItemParser :: Visibility -> Parser Item
+entityItemParser v = do
+    pos <- tokenPosition <$> ident "entity"
+    entityProto <- term >>= parseWith termToEntityProto
+    entityModifiers <- embracedTerm >>= parseWith termToEntityModifiers
+    return $ EntityDecl v entityProto entityModifiers $ Just pos
 
 -----------------------------------------------------------------------------
 -- Handling type modifiers                                                 --
@@ -993,6 +1005,28 @@ termToBody (Embraced pos Brace [body] Nothing) =
     termToBody body
 termToBody other = (:[]) <$> termToStmt other
 
+-- | Convert a Term to a list of entity modifiers
+termToEntityModifiers :: TranslateTo [EntityModifier]
+termToEntityModifiers (Embraced pos Brace modifierSpecs Nothing) =
+    mapM termToEntityModifier modifierSpecs
+termToEntityModifiers _ =
+    shouldnt "Entity modifier specifications should be wrapped in braces"
+
+-- | Convert a Term to an entity modifier
+termToEntityModifier :: TranslateTo EntityModifier
+termToEntityModifier (Call pos [] "::" ParamIn [attrTerms, modifierTerm]) =
+    return $ EntityModifier attrs modifier
+    where
+        attrs = case attrTerms of
+                    Call _ [] attr ParamIn [] -> [attr]
+                    Embraced _ Paren attrs Nothing -> callName <$> attrs
+                    other -> nyi $ "nyi attrs " ++ show other
+        modifier = case callName modifierTerm of
+                        "key" -> Key
+                        "index" -> Index
+                        other -> nyi $ "nyi modifier " ++ other
+termToEntityModifier _ =
+    shouldnt "Invalid syntax for parsing an entity modifier"
 
 -- |Convert a Term to a Stmt, if possible, or give a syntax error if not.
 termToStmt :: TranslateTo (Placed Stmt)
@@ -1087,6 +1121,11 @@ termToGenerators (Call pos [] "in" ParamIn [var,exp]) = do
     var' <- termToExp var
     exp' <- termToExp exp
     return [Placed (In var' exp') pos]
+termToGenerators call@(Call pos _ _ _ _) = do
+    stmt <- termToStmt call
+    case content stmt of
+        ProcCall{} -> return [Placed (Lookup stmt) pos]
+        _ -> syntaxError (termPos call) $ "invalid generator " ++ show call
 termToGenerators other =
     syntaxError (termPos other) $ "invalid generator " ++ show other
 
@@ -1338,6 +1377,24 @@ termToResourceList (Call _ mod name ParamIn []) =
     return [ResourceSpec mod name]
 termToResourceList other =
     syntaxError (termPos other) "expected resource spec"
+
+-- | Translate a Term to an entity prototype
+termToEntityProto :: TranslateTo (Placed ProcProto)
+termToEntityProto (Call pos [] name ParamIn attrs) = do
+    attrs' <- mapM termToEntityAttr attrs
+    return $ ProcProto name attrs' Set.empty `maybePlace` Just pos
+termToEntityProto other =
+    syntaxError (termPos other)
+        $ "invalid entity declaration " ++ show other
+
+-- | Translate a Term to an entity attribute
+termToEntityAttr :: TranslateTo (Placed Param)
+termToEntityAttr (Call pos [] ":" ParamIn [Call _ [] name ParamIn [], ty]) = do
+    ty' <- termToTypeSpec ty
+    return $ Param name ty' ParamIn Ordinary `maybePlace` Just pos
+termToEntityAttr other =
+    syntaxError (termPos other)
+        $ "invalid entity attribute " ++ show other
 
 -----------------------------------------------------------------------------
 -- Data structures                                                         --

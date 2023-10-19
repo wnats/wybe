@@ -1,0 +1,4 @@
+# purpose: Impure Memory Management
+# since  : 0.1
+
+pub resource mem:phantom = 0:phantom

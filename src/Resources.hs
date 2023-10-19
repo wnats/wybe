@@ -8,6 +8,7 @@
 {-# LANGUAGE TupleSections #-}
 
 module Resources (resourceCheckMod, canonicaliseProcResources,
+                  addEntityResource, monkeyPatchEntityResources,
                   canonicaliseResourceSpec,
                   transformProcResources) where
 
@@ -16,6 +17,7 @@ import           Control.Monad
 import           Control.Monad.Trans
 import           Control.Monad.Trans.State
 import           Data.Graph
+import           Data.Function             ( on )
 import           Data.List                 as List
 import           Data.Map                  as Map
 import           Data.Maybe
@@ -29,7 +31,7 @@ import           Options                   (LogSelection (Resources))
 import           Snippets
 import           Util
 import           Debug.Trace
-import Control.Monad.Extra (unlessM)
+import Control.Monad.Extra (unlessM, concatMapM)
 
 
 
@@ -480,6 +482,57 @@ addResourceInOuts fl nm ty = do
                                             Map.fromList [(res,ty) | flowsIn fl],
                                   resOut=resOut s `Map.union`
                                             Map.fromList [(res,ty) | flowsOut fl]})
+
+
+----------------------------------------------------------------
+--               Monkey Patching Entity Resources
+----------------------------------------------------------------
+
+-- | Add the specified entity resource, ensuring that it is canonicalised
+addEntityResource :: ResourceSpec -> Compiler ()
+addEntityResource rspec = do
+    rspec' <- fst <$> canonicaliseResourceSpec Nothing "addEntityResource" rspec
+    modEtyRess <- fromMaybe Set.empty
+                    <$> getModuleImplementationField modEntityResources
+    let modEtyRess' = Set.insert rspec' modEtyRess
+    updateImplementation
+        (\imp -> imp { modEntityResources = Just modEtyRess' })
+
+-- | Monkey patch resources with the template "!<entity>"
+monkeyPatchEntityResources :: ProcDef -> Int -> Compiler ProcDef
+monkeyPatchEntityResources pd _ = do
+    let resFlowSet = procProtoResources $ procProto pd
+        pos = procPos pd
+
+    (del, ins) <- findResourcesToMonkeyPatch resFlowSet pos
+
+    let resFlowSet' = resFlowSet `Set.difference` del
+        resFlowSet'' = resFlowSet' `Set.union` ins
+    
+    return pd { procProto = (procProto pd){ procProtoResources = resFlowSet'' } }
+
+-- | Finds the associated entity resources to monkey patch.
+--   Returns (<replaced>, <replacement>)
+findResourcesToMonkeyPatch :: Set ResourceFlowSpec -> OptPos -> Compiler (Set ResourceFlowSpec, Set ResourceFlowSpec)
+findResourcesToMonkeyPatch resFlowSet pos = do
+    let resFlowList = Set.toList resFlowSet
+    etyResFlowList <- filterM (fmap isNothing . lookupResource . resourceFlowRes) resFlowList
+    
+    let etyModSpecs = resTemplateToModSpec . resourceFlowRes <$> etyResFlowList
+        flows = resourceFlowFlow <$> etyResFlowList
+    
+    unless (all (==ParamInOut) flows)
+        $ errmsg pos "Entity resource flows should be In & Out"
+
+    newResList <- concatMapM ((Set.toList . fromMaybe Set.empty . modEntityResources <$>) . getLoadedModuleImpln) etyModSpecs
+
+    let newResFlowList = flip ResourceFlowSpec ParamInOut <$> newResList
+    
+    return $ ((,) `on` Set.fromList) etyResFlowList newResFlowList
+
+resTemplateToModSpec :: ResourceSpec -> ModSpec
+resTemplateToModSpec (ResourceSpec modSpec name) = modSpec ++ [name]
+
 
 ------------------------- General support code -------------------------
 
