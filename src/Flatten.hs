@@ -498,10 +498,8 @@ lookupStrategy :: ModSpec -> [VarName] -> [Placed Exp] -> OptPos -> Flattener (P
 lookupStrategy etyModSpec attrs pAttrArgs pos = do
     modDict <- lift $ trustFromJust "lookupInitNext"
                         . modEntityModDict <$> getLoadedModuleImpln etyModSpec
-    logFlatten $ show modDict
     let inAttrArgs = List.filter (Set.null . expOutputs . content . snd) $ zip attrs pAttrArgs
-    logFlatten $ show inAttrArgs
-    let mbKeyAttrArg = List.find (liftM2 any isKey (\k -> Map.findWithDefault [] k modDict) . fst) inAttrArgs
+        mbKeyAttrArg = List.find (liftM2 any isKey (\k -> Map.findWithDefault [] k modDict) . fst) inAttrArgs
         mbIndexAttrArg = List.find (liftM2 any isIndex (\k -> Map.findWithDefault [] k modDict) . fst) inAttrArgs
         nullEty = ForeignFn "lpvm" "cast" [] [Unplaced $ iVal 0]
         etyTmp = entityVariableName
@@ -519,7 +517,7 @@ lookupStrategy etyModSpec attrs pAttrArgs pos = do
         -- !cuckoo.lookup(resTmp,  get_<attr>, hash, `=`, <key>, ?#ety)
         flattenStmt (cuckooLookupProcCall resTmp attr arg entityVariableName) pos Det
         -- Set #ety to null
-        return $ move (varGet etyTmp) nullEty
+        return $ move nullEty (varSet etyTmp) 
     else if isJust mbIndexAttrArg
     then do
         let (attr, arg) = trustFromJust "lookupStrategy: Index" mbIndexAttrArg
@@ -559,8 +557,8 @@ lookupStrategy etyModSpec attrs pAttrArgs pos = do
 cuckooLookupProcCall :: VarName -> VarName -> Placed Exp -> VarName -> Stmt
 cuckooLookupProcCall resVar attr key etyOut =
     -- !cuckoo.lookup(<resVar>,  get_<attr>, hash, `=`, <key>, ?#ety)
-    ProcCall (regularModProc cuckooModSpec "pop") Det True
-        [Unplaced $ varGetSet resVar Ordinary,
+    ProcCall (regularModProc cuckooModSpec "lookup") Det True
+        [Unplaced $ varGet resVar,
          Unplaced $ varGet $ entityGetterName attr,
          Unplaced $ varGet hashProcName,
          Unplaced $ varGet "=",

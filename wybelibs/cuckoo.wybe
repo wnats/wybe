@@ -68,12 +68,12 @@ pub def insert(!cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{resource}
         unsafe_update(!cuckoo_table, t_idx, val)
 
         # Prepare for the next eviction cycle (if eviction happens on this cycle)
-        if { foreign lpvm cast(vic) = EMPTY :: ?cycle_exists = false; break
-        |    else                           :: ?val = vic; incr(!eviction_cnt)
+        if { foreign lpvm cast(vic) = EMPTY :: ?cycle_exists = false; ?val = val; break
+        |    else                           :: ?cycle_exists = true; ?val = vic; incr(!eviction_cnt)
         }
         ?i_table = (i_table + 1) % N_TABLE
     }
-    
+
     if { cycle_exists :: ?nxt = next_prime(t_length); !error("Cycle") }
 }
 
@@ -186,7 +186,7 @@ pub def entity_delete(!cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{re
 }
 
 # XXX: Prettify the table
-pub def print_table(cuckoo_table:array(V), val2key:{resource}(V,?K), printer:{resource}(K)) use !io {
+pub def {noinline} print_table(cuckoo_table:array(V), val2key:{resource}(V,?K), printer:{resource}(K)) use !io {
     !println("Cuckoo Table:")
     ?len = cuckoo_table^length / 2
     ?i = 0

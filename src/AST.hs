@@ -28,11 +28,11 @@ module AST (
   VarDict, TypeImpln(..),
   ProcProto(..), Param(..), TypeFlow(..),
   paramTypeFlow, primParamTypeFlow, setParamArgFlowType,
-  paramToVar, primParamToArg, unzipTypeFlow, unzipTypeFlows,
+  paramToVar, placedParamToVar, primParamToArg, unzipTypeFlow, unzipTypeFlows,
   PrimProto(..), PrimParam(..), ParamInfo(..),
   EntityModifier(..), EntityModifierType(..),
   MergedAttrNames, EntityModifierInfo(..), EntityModifierDict,
-  mergeAttrNames, buildEntityModifierDict,
+  mergeAttrNames, unMergeAttrNames, buildEntityModifierDict,
   Exp(..), StringVariant(..), GlobalInfo(..), Generator(..), Stmt(..), ProcFunctor(..),
   regularProc, regularModProc,
   flattenedExpFlow, expIsVar, expIsConstant, expVar, expVar', maybeExpType, innerExp,
@@ -2799,7 +2799,7 @@ instance Show PrimProto where
 
 -- | An entity's modifier
 data EntityModifier = EntityModifier {
-    entityModifierAttr :: [Ident],
+    entityModifierAttr :: [VarName],
     entityModifierType :: EntityModifierType
 } deriving (Eq, Generic, Show)
 
@@ -2808,11 +2808,18 @@ data EntityModifier = EntityModifier {
 data EntityModifierType = Key | Index deriving (Show, Generic, Ord, Eq)
 
 -- | e.g. first + last = #first#last
-type MergedAttrNames = Ident
+type MergedAttrNames = VarName
+
+mergeString :: Ident
+mergeString = [specialChar]
 
 -- | Combine attribute names
-mergeAttrNames :: [Ident] -> MergedAttrNames
-mergeAttrNames = intercalate [specialChar]
+mergeAttrNames :: [VarName] -> MergedAttrNames
+mergeAttrNames = intercalate mergeString
+
+-- | Uncombine attribute names
+unMergeAttrNames :: MergedAttrNames -> [VarName]
+unMergeAttrNames = splitOn mergeString  
 
 data EntityModifierInfo
     = KeyModifierInfo MergedAttrNames
@@ -2928,6 +2935,12 @@ paramToVar :: Param -> Placed Exp
 paramToVar (Param n t f ft)
     = Unplaced $ Typed (Var n f ft) t Nothing
 
+-- | Convert a Placed Param to an equivalent Var placed in the same position
+placedParamToVar :: Placed Param ->  Placed Exp
+placedParamToVar pParam =
+    Typed (Var name flow flowType) typeSpec Nothing `maybePlace` pos
+    where
+        (Param name typeSpec flow flowType, pos) = unPlace pParam
 
 -- |Convert a PrimParam to a PrimArg
 primParamToArg :: PrimParam -> PrimArg
@@ -3788,20 +3801,20 @@ cuckooModSpec = [cuckooResourceBaseName]
 keyResourceBaseName :: Ident
 keyResourceBaseName = "key"
 
-keyResourceName :: VarName -> ResourceName
+keyResourceName :: MergedAttrNames -> ResourceName
 keyResourceName = specialName2 keyResourceBaseName
 
-keyFieldResourceSpec :: VarName -> ResourceSpec
+keyFieldResourceSpec :: MergedAttrNames -> ResourceSpec
 keyFieldResourceSpec fieldName =
     ResourceSpec [] $ keyResourceBaseName `specialName2` fieldName
 
 indexResourceBaseName :: Ident
 indexResourceBaseName = "index"
 
-indexResourceName :: VarName -> ResourceName
+indexResourceName :: MergedAttrNames -> ResourceName
 indexResourceName = specialName2 indexResourceBaseName
 
-indexFieldResourceSpec :: VarName -> ResourceSpec
+indexFieldResourceSpec :: MergedAttrNames -> ResourceSpec
 indexFieldResourceSpec fieldName =
     ResourceSpec [] $ indexResourceBaseName `specialName2` fieldName
 
