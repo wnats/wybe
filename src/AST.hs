@@ -1885,13 +1885,14 @@ importsSelected imports items =
 -- | Pragmas that can be specified for a module
 data Pragma = NoStd        -- ^ Don't import that standard library for this mod
             | AddSimpleResource
-            | UseRelation [ProcName]
+            | UseRelation [ModSpec]
    deriving (Eq,Ord,Generic)
 
 instance Show Pragma where
     show NoStd = "no_standard_library"
     show AddSimpleResource = "add_simple_resource"
-    show (UseRelation relations) = "relation: " ++ intercalate ", " relations
+    show (UseRelation relMods) =
+        "relation: " ++ intercalate ", " (showModSpec <$> relMods)
 
 
 -- |Specify a pragma for the current module

@@ -115,8 +115,7 @@ parsePragma = (ident "no_standard_library" $> NoStd)
 parseRelationPragma :: Parser Pragma
 parseRelationPragma = do
     ident "relation"
-    emb <- embraced <$> embracedTerm
-    relations <- mapM (parseWith termToRelation) emb
+    relations <- moduleSpec `sepBy` comma
     return $ UseRelation relations
 
 -- | Module item parser.
@@ -1414,11 +1413,6 @@ termToEntityAttr (Call pos [] ":" ParamIn [Call _ [] name ParamIn [], ty]) = do
 termToEntityAttr other =
     syntaxError (termPos other)
         $ "invalid entity attribute " ++ show other
-
--- | Translate a Term to a relation name
-termToRelation :: TranslateTo ProcName
-termToRelation (Call _ _ relName ParamIn []) = return relName
-termToRelation other = syntaxError (termPos other) "Invalid relation term"
 
 -----------------------------------------------------------------------------
 -- Data structures                                                         --
