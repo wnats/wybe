@@ -90,6 +90,7 @@ visibilityItem = do
         <|> useItemParser v
         <|> fromUseItemParser v
         <|> entityItemParser v
+        <|> relationItemParser v
     <?> "top-level item"
 
 
@@ -294,6 +295,12 @@ entityItemParser v = do
     entityProto <- term >>= parseWith termToEntityProto
     entityModifiers <- embracedTerm >>= parseWith termToEntityModifiers
     return $ EntityDecl v entityProto entityModifiers $ Just pos
+
+relationItemParser :: Visibility -> Parser Item
+relationItemParser v = do
+    pos <- tokenPosition <$> ident "relation"
+    relationProto <- term >>= parseWith termToEntityProto
+    return $ RelationDecl v relationProto $ Just pos
 
 -----------------------------------------------------------------------------
 -- Handling type modifiers                                                 --
@@ -1394,6 +1401,10 @@ termToEntityProto (Call pos [] name ParamIn attrs) = do
 termToEntityProto other =
     syntaxError (termPos other)
         $ "invalid entity declaration " ++ show other
+
+-- | Translate a Term to a relation prototype
+termToRelationProto :: TranslateTo (Placed ProcProto)
+termToRelationProto = termToEntityProto
 
 -- | Translate a Term to an entity attribute
 termToEntityAttr :: TranslateTo (Placed Param)
