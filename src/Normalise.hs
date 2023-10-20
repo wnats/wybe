@@ -167,7 +167,8 @@ normaliseItem (EntityDecl vis placedEntityProto entityMods pos) = do
                     pos
         )
         (keyResNames ++ indexResNames)
-
+normaliseItem (RelationDecl vis relationProto pos) =
+    nyi "not yet"
 normaliseItem (StmtDecl stmt pos) = do
     logNormalise $ "Normalising statement decl " ++ show stmt
     updateModule (\s -> s { stmtDecls = maybePlace stmt pos : stmtDecls s})

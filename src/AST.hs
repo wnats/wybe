@@ -194,6 +194,7 @@ data Item
      | FuncDecl Visibility ProcModifiers ProcProto TypeSpec (Placed Exp) OptPos
      | ProcDecl Visibility ProcModifiers ProcProto [Placed Stmt] OptPos
      | EntityDecl Visibility (Placed ProcProto) [EntityModifier] OptPos
+     | RelationDecl Visibility (Placed ProcProto) OptPos
      | StmtDecl Stmt OptPos
      | PragmaDecl Pragma
      deriving (Generic, Eq)
@@ -1884,11 +1885,13 @@ importsSelected imports items =
 -- | Pragmas that can be specified for a module
 data Pragma = NoStd        -- ^ Don't import that standard library for this mod
             | AddSimpleResource
+            | UseRelation [ProcName]
    deriving (Eq,Ord,Generic)
 
 instance Show Pragma where
     show NoStd = "no_standard_library"
     show AddSimpleResource = "add_simple_resource"
+    show (UseRelation relations) = "relation: " ++ intercalate ", " relations
 
 
 -- |Specify a pragma for the current module
@@ -3962,6 +3965,10 @@ instance Show Item where
     visibilityPrefix vis
     ++ show entityProto
     ++ show entityModifiers
+    ++ showOptPos pos
+  show (RelationDecl vis relationProto pos) =
+    visibilityPrefix vis
+    ++ show relationProto
     ++ showOptPos pos
   show (StmtDecl stmt pos) =
     showStmt 4 stmt ++ showOptPos pos

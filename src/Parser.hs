@@ -108,7 +108,15 @@ pragmaItem = ident "pragma" *> (PragmaDecl <$> parsePragma)
 parsePragma :: Parser Pragma
 parsePragma = (ident "no_standard_library" $> NoStd)
                 <|> (ident "add_simple_resource" $> AddSimpleResource)
+                <|> parseRelationPragma
 
+-- | Parse a relation pragma. Specifes the entity uses these relations.
+parseRelationPragma :: Parser Pragma
+parseRelationPragma = do
+    ident "relation"
+    emb <- embraced <$> embracedTerm
+    relations <- mapM (parseWith termToRelation) emb
+    return $ UseRelation relations
 
 -- | Module item parser.
 moduleItem :: Visibility -> Parser Item
@@ -1395,6 +1403,11 @@ termToEntityAttr (Call pos [] ":" ParamIn [Call _ [] name ParamIn [], ty]) = do
 termToEntityAttr other =
     syntaxError (termPos other)
         $ "invalid entity attribute " ++ show other
+
+-- | Translate a Term to a relation name
+termToRelation :: TranslateTo ProcName
+termToRelation (Call _ _ relName ParamIn []) = return relName
+termToRelation other = syntaxError (termPos other) "Invalid relation term"
 
 -----------------------------------------------------------------------------
 -- Data structures                                                         --
