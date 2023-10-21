@@ -5,7 +5,6 @@
 --  License  : Licensed under terms of the MIT license.  See the file
 --           : LICENSE in the root directory of this project.
 
-{-# LANGUAGE TupleSections #-}
 
 -- |Support for normalising wybe code as parsed to a simpler form
 --  to make compiling easier.
@@ -18,7 +17,7 @@ import Config (wordSize, wordSizeBytes, availableTagBits,
                tagMask, smallestAllocatedAddress, currentModuleAlias)
 import Control.Monad
 import Control.Monad.State (gets)
-import Control.Monad.Trans (lift,liftIO)
+import Control.Monad.Trans (lift)
 import Control.Monad.Extra (concatMapM)
 import Data.List as List
 import Data.Map as Map
@@ -33,7 +32,6 @@ import Options (LogSelection(Normalise))
 import Resources (addEntityResource)
 import Snippets
 import Util
-import Distribution.Parsec.FieldLineStream (fieldLineStreamEnd)
 import UnivSet (UnivSet(FiniteSet, UniversalSet))
 import Data.Function (on)
 import Data.List.Extra (groupSort)
@@ -167,12 +165,19 @@ normaliseItem (EntityDecl vis placedEntityProto entityMods pos) = do
                     pos
         )
         (keyResNames ++ indexResNames)
-normaliseItem (RelationDecl vis relationProto pos) =
-    nyi "not yet"
+normaliseItem (RelationDecl vis relationProto _) = do
+    addRelation vis relationProto
 normaliseItem (StmtDecl stmt pos) = do
     logNormalise $ "Normalising statement decl " ++ show stmt
     updateModule (\s -> s { stmtDecls = maybePlace stmt pos : stmtDecls s})
 normaliseItem (PragmaDecl prag) = do
+    case prag of
+        UseRelation mods -> do
+            mbRels <- getModuleImplementationField modEntityRelations
+            unless (isNothing mbRels)
+                $ errmsg Nothing "Multiple relation pragma"
+            updateImplementation (\s -> s { modEntityRelations = Just mods })
+        _ -> nop
     addPragma prag
 
 
@@ -265,6 +270,11 @@ data TypeDef = CtorDef {
     | EntityDef {
         entityDefMember :: (Visibility, Placed ProcProto),
         entityModifiers :: EntityModifierDict
+    }
+    | RelationDef {
+        relationDefName :: ProcName,
+        relationDefEty0 :: TypeSpec,
+        relationDefEty1 :: TypeSpec
     } deriving (Eq, Show)
 
 
@@ -294,6 +304,7 @@ modTypeDeps :: Set ModSpec -> Compiler ((ModSpec,TypeDef), ModSpec, [ModSpec])
 modTypeDeps modSet = do
     tyMod <- getModule modSpec
     maybeCtorsVis <- getModuleImplementationField modConstructors
+    maybeEntity <- getModuleImplementationField modEntity
     if isJust maybeCtorsVis
     then do
         tyParams <- getModule modParams
@@ -305,7 +316,8 @@ modTypeDeps modSet = do
                     . procProtoParams . content)
                     ctors
         return ((tyMod, CtorDef tyParams ctorsVis), tyMod, deps)
-    else do
+    else if isJust maybeEntity
+    then do
         tyMod <- getModule modSpec
         entityVis <- trustFromJust "modTypeDeps"
                         <$> getModuleImplementationField modEntity
@@ -317,6 +329,14 @@ modTypeDeps modSet = do
                     . procProtoParams . content)
                     proto
         return ((tyMod, EntityDef entityVis entityModDict), tyMod, deps)
+    else do
+        tyMod <- getModule modSpec
+        relName <- trustFromJust "modTypeDeps"
+                    <$> getModuleImplementationField modRelationName
+        (ety0, ety1) <- trustFromJust "modTypeDeps"
+                        <$> getModuleImplementationField modRelationEntities
+        -- TODO: Check that ety0 and ety1 are actually entity types
+        return ((tyMod, RelationDef relName ety0 ety1), tyMod, [])
 
 -- | Resolve constructor argument types.
 resolveCtorTypes :: ProcProto -> OptPos -> Compiler (Placed ProcProto)
@@ -459,12 +479,23 @@ completeType modspec (EntityDef entityProtoVis@(vis, entityProto) entityModDict)
     normalise itemsList
     -- TODO: Check for duplicate attribute names
     reexitModule
+completeType modspec relDef@(RelationDef relName ety0 ety1) = do
+    logNormalise $ "Completing type " ++ showModSpec modspec
+    reenterModule modspec
+    let typespec = TypeSpec [] currentModuleAlias []
+        (rep, itemsList) = relationItems typespec relName ety0 ety1
+    setTypeRep rep
+    logNormalise $ "Representation of type " ++ showModSpec modspec
+                   ++ " is " ++ show rep
+    normalise itemsList
+    reexitModule
+
 
 -- | Record used entity resources in a proc
 recordEntityResources :: Item -> Compiler ()
 recordEntityResources (ProcDecl _ _ (ProcProto _ _ resFlowSet) _ _) =
     mapM_ (addEntityResource . resourceFlowRes) resFlowSet
-recordEntityResources _ = return ()
+recordEntityResources _ = nop
 
 -- | Analyse the representation of a single constructor, determining the
 --   representation of its members, its total size in bits (assuming it is
@@ -1239,9 +1270,15 @@ equalityField param =
 entityItems :: TypeSpec -> CtorInfo -> EntityModifierDict
                -> Compiler (TypeRepresentation, [Item])
 entityItems typeSpec info@(CtorInfo entityName paramInfos vis pos 0 bits) modDict = do
+    relations <- fromMaybe [] <$> getModuleImplementationField modEntityRelations
+    relParamInfos <- concatMapM (relationParamInfo entityName typeSpec) relations
+
     let modInfos = List.nub . concat $ Map.elems modDict
         indexNames = [names | IndexModifierInfo names <- modInfos]
-        (fields, size) = layoutRecord (paramInfos ++ entityPtrParamInfo entityName typeSpec indexNames) 0 1
+        (fields, size) =
+            layoutRecord (paramInfos
+                            ++ entityPtrParamInfo entityName typeSpec indexNames
+                            ++ relParamInfos) 0 1
 
     logNormalise $ "Laid out structure size " ++ show size
         ++ ": " ++ show fields
@@ -1256,13 +1293,20 @@ entityItems typeSpec info@(CtorInfo entityName paramInfos vis pos 0 bits) modDic
 
         createItem = entityCreateItem vis entityName typeSpec params fields size pos keyNames
 
-        getItems = entityGetItems vis typeSpec size <$> fields
+        (attrFieldInfos,
+         nextPtrFieldInfo,
+         indexFieldInfos,
+         relFieldInfos) = partitionFieldInfos fields
+
+        getItems = entityGetItem vis typeSpec size
+                    <$> attrFieldInfos ++ nextPtrFieldInfo:indexFieldInfos
+        offsetItems = entityOffsetItem vis typeSpec <$> relFieldInfos
 
         -- TODO: Don't allow key attributes to be set
-        setItems = entitySetItems entityName vis typeSpec size modDict <$> fields
+        setItems = entitySetItem entityName vis typeSpec size modDict <$> fields
 
         itemsList = getLastEtyResItem:getKeyResItems ++ getIndexResItems
-                        ++ createItem:getItems ++ setItems
+                        ++ createItem:getItems ++ offsetItems ++ setItems
 
     return (Address, itemsList)
 
@@ -1280,6 +1324,28 @@ entityPtrParamInfo etyName typeSpec indexNames =
             CtorParamInfo
                 (Unplaced $ Param name typeSpec ParamIn Ordinary)
                 False Address wordSize
+
+-- | Generate param info for relation fields in an entity
+relationParamInfo :: ProcName -> TypeSpec -> ModSpec -> Compiler [CtorParamInfo]
+relationParamInfo etyName typeSpec relMod = do
+    (relType0, relType1) <- trustFromJust "relationParamInfo" . modRelationEntities
+                                <$> getLoadedModuleImpln relMod
+    
+    let relName = last relMod
+        relParam0 = if etyName == typeName relType0
+                    then
+                        Just $ CtorParamInfo
+                            (Unplaced $ Param (specialName2 relName "1") (listType typeSpec) ParamIn Ordinary)
+                            False Address wordSize
+                    else Nothing
+        relParam1 = if etyName == typeName relType1
+                    then
+                        Just $ CtorParamInfo
+                            (Unplaced $ Param (specialName2 relName "0") (listType typeSpec) ParamIn Ordinary)
+                            False Address wordSize
+                    else Nothing
+    
+    return $ catMaybes [relParam0, relParam1]
 
 ----------------------------------------------------------------
 --              Entity Items (Proc Declarations)
@@ -1332,7 +1398,9 @@ entityCreateItem vis entityName typeSpec params fields size pos keyNames =
 
         (attrFieldInfos,
          nextPtrFieldInfo,
-         indexFieldInfos) = partitionFieldInfos fields
+         indexFieldInfos,
+         relFieldInfos) = partitionFieldInfos fields
+        -- TODO: Initialise relFieldInfos to []
 
         keyResFlowSpecs =
             flip ResourceFlowSpec ParamInOut . keyFieldResourceSpec entityName
@@ -1356,8 +1424,8 @@ entityCreateItem vis entityName typeSpec params fields size pos keyNames =
                             ++ (cuckooInsertStmt entityName pos <$> keyNames)
 
 -- | Generate getter code for an entity
-entityGetItems :: Visibility -> TypeSpec -> Int -> FieldInfo -> Item
-entityGetItems vis etyType etySize (FieldInfo fieldName pos _ fieldType rep offset _) =
+entityGetItem :: Visibility -> TypeSpec -> Int -> FieldInfo -> Item
+entityGetItem vis etyType etySize (FieldInfo fieldName pos _ fieldType rep offset _) =
     ProcDecl vis (inlineModifiers (GetterProc fieldName fieldType) Det)
         (ProcProto procName protoParams resSet) [stmt] pos
     where
@@ -1379,10 +1447,23 @@ entityGetItems vis etyType etySize (FieldInfo fieldName pos _ fieldType rep offs
                 ]
                 `maybePlace` pos
 
+-- | Generate getter code for an entity's offset to the related entity list
+entityOffsetItem :: Visibility -> TypeSpec -> FieldInfo -> Item
+entityOffsetItem vis etyType (FieldInfo fieldName pos _ fieldType rep offset _) =
+    ProcDecl vis (inlineModifiers (GetterProc fieldName fieldType) Det)
+        (ProcProto procName protoParams Set.empty) [stmt] pos
+    where
+        procName = entityOffsetName fieldName
+        protoParams = [Param entityVariableName etyType ParamIn Ordinary
+                        `maybePlace` pos,
+                       Unplaced $ Param fieldName intType ParamOut Ordinary
+                      ]
+        stmt = rePlace pos $ move (iVal offset) (varSetTyped fieldName intType)
+
 -- | Generate setter code for an entity
-entitySetItems :: ProcName -> Visibility -> TypeSpec -> Int
+entitySetItem :: ProcName -> Visibility -> TypeSpec -> Int
                   -> EntityModifierDict -> FieldInfo -> Item
-entitySetItems etyName vis etyType etySize modDict (FieldInfo fieldName pos _ fieldType rep offset _) =
+entitySetItem etyName vis etyType etySize modDict (FieldInfo fieldName pos _ fieldType rep offset _) =
     ProcDecl vis (inlineModifiers (SetterProc fieldName fieldType) Det)
         (ProcProto procName protoParams resSet)
         (deleteStmts ++ defaultStmt:insertStmts)
@@ -1422,15 +1503,15 @@ entitySetItems etyName vis etyType etySize modDict (FieldInfo fieldName pos _ fi
 --       Helper Functions for entityCreateItem
 ----------------------------------------------------------------
 
-partitionFieldInfos :: [FieldInfo] -> ([FieldInfo], FieldInfo, [FieldInfo])
+partitionFieldInfos :: [FieldInfo] -> ([FieldInfo], FieldInfo, [FieldInfo], [FieldInfo])
 partitionFieldInfos fieldInfos =
-    if List.null ptrFieldInfos then shouldnt "Empty pointer field info"
-    else (attrFieldInfos, nextPtrFieldInfo, indexFieldInfos)
+    if List.null ptrs then shouldnt "Empty pointer field info"
+    else (attrFieldInfos, nextPtrFieldInfo, indexFieldInfos, relFieldInfos)
     where
-        attrFieldInfos = takeWhile (not . isPrefixOf [specialChar] . fldName) fieldInfos
-        ptrFieldInfos = dropWhile (not . isPrefixOf [specialChar] . fldName) fieldInfos
-        nextPtrFieldInfo = head ptrFieldInfos
-        indexFieldInfos = tail ptrFieldInfos
+        (attrFieldInfos, ptrs@(nextPtrFieldInfo:rest)) =
+            break (isPrefixOf [specialChar] . fldName) fieldInfos
+        (indexFieldInfos, relFieldInfos) =
+            span (isPrefixOf [specialChar] . fldName) rest
 
 keyLookupStmts :: ProcName -> [Placed Param] -> MergedAttrNames -> (VarName, Placed Stmt)
 keyLookupStmts etyName params lookupKey = (etyOutVar, lookupCall)
@@ -1595,6 +1676,88 @@ cuckooInsertStmt etyName pos key =
 --             [initialiseOut, iterateTable]
 --             pos
 
+----------------------------------------------------------------
+--              Relation Items (Proc Declarations)
+----------------------------------------------------------------
+relationItems :: TypeSpec -> ProcName -> TypeSpec -> TypeSpec
+                 -> (TypeRepresentation, [Item])
+relationItems ty relName ety0 ety1 =
+    (Address, [relateItem, get0Item, get1Item])
+    where
+        relateItem = relationRelateItem relName ety0 ety1
+        get0Item = relationGetItem relName ety0 ety1 1
+        get1Item = relationGetItem relName ety1 ety0 0
+
+relationRelateItem :: ProcName -> TypeSpec -> TypeSpec -> Item
+relationRelateItem relName ety0 ety1 =
+    ProcDecl Public (setInline NoInline $ inlineModifiers (ConstructorProc procName) Det)
+        (ProcProto procName protoParams resSet)
+        (Unplaced <$> [get0, mut0, get1, mut1])
+        Nothing
+    where
+        procName = relationRelateName
+        protoParams = [Unplaced $ Param leftName ety0 ParamIn Ordinary,
+                       Unplaced $ Param rightName ety1 ParamIn Ordinary]
+        resSet = Set.singleton $ ResourceFlowSpec dbResourceSpec ParamInOut
+
+        ety0Exp = Unplaced $ varGetTyped leftName ety0
+        ety0Rel = relName `specialName2` "1"
+
+        ety1Exp = Unplaced $ varGetTyped rightName ety1
+        ety1Rel = relName `specialName2` "0"
+
+        -- !get_<relName>#1(#left, <relName>#1:list(<ety1>))
+        get0 = ProcCall (regularProc $ entityGetterName ety0Rel)
+                Det True
+                [ety0Exp,
+                 Unplaced $ varSetTyped ety0Rel $ listType ety1
+                ]
+        -- foreign lpvm unsafe_mutate(#left, offset_<relName>#1(#left), [#right | <relName>#1], !db)
+        mut0 = ForeignCall "lpvm" "unsafe_mutate" []
+                [ety0Exp,
+                 Unplaced $ Fncall [] (entityOffsetName ety0Rel) False [ety0Exp],
+                 Unplaced $ Fncall [] "[|]" False [ety1Exp, Unplaced $ varGet ety0Rel],
+                 Unplaced $ varGetSet dbResourceName Ordinary
+                ]
+
+        -- !get_<relName>#0(#right, <relName>#0:list(<ety0>))
+        get1 = ProcCall (regularProc $ entityGetterName ety1Rel)
+                Det True
+                [ety1Exp,
+                 Unplaced $ varSetTyped ety1Rel $ listType ety0
+                ]
+
+        -- foreign lpvm unsafe_mutate(#right, offset_<relName>#0(#right), [#left | <relName>#0], !db)
+        mut1 = ForeignCall "lpvm" "unsafe_mutate" []
+                [ety1Exp,
+                 Unplaced $ Fncall [] (entityOffsetName ety1Rel) False [ety1Exp],
+                 Unplaced $ Fncall [] "[|]" False [ety0Exp, Unplaced $ varGet ety1Rel],
+                 Unplaced $ varGetSet dbResourceName Ordinary
+                ]
+
+relationGetItem :: ProcName -> TypeSpec -> TypeSpec -> Int -> Item
+relationGetItem relName etyInType etyOutType order = 
+    ProcDecl Public (setInline NoInline $ inlineModifiers (GetterProc procName (listType etyOutType)) Det)
+        (ProcProto procName protoParams resSet)
+        [Unplaced stmt]
+        Nothing
+    where
+        procName = entityGetterName relName `specialName2` show order
+        protoParams = [Unplaced $ Param entityVariableName etyInType ParamIn Ordinary,
+                       Unplaced $ Param outputVariableName (listType etyOutType) ParamOut Ordinary]
+        resSet = Set.singleton $ ResourceFlowSpec dbResourceSpec ParamInOut
+        etyInExp = Unplaced $ varGetTyped entityVariableName etyInType
+
+        -- foreign lpvm access(#ety, offset_<relName>#<order>(#ety), 8, 0, ?#result, !db)
+        stmt = ForeignCall "lpvm" "access" []
+                [etyInExp,
+                 Unplaced $ Fncall [] (entityOffsetName relName `specialName2` show order) False [etyInExp],
+                 Unplaced $ iVal wordSizeBytes,  -- TODO: Update with actual entity structure size
+                 Unplaced $ iVal 0,
+                 Unplaced $ varSetTyped outputVariableName $ listType etyOutType,
+                 Unplaced $ varGetSet dbResourceName Ordinary
+                ]
+            
 ----------------------------------------------------------------
 --           Proc Modifiers when writing Proc Proto
 ---------------------------------------------------------------

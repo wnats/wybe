@@ -90,7 +90,7 @@ module AST (
   CompilerState(..), Compiler, runCompiler,
   updateModules, updateImplementations, updateImplementation,
   updateTypeModifiers,
-  addParameters, addTypeRep, setTypeRep, addConstructor, addEntity,
+  addParameters, addTypeRep, setTypeRep, addConstructor, addEntity, addRelation,
   getModuleImplementationField, getModuleImplementation,
   getLoadedModule, getLoadingModule, updateLoadedModule, updateLoadedModuleM,
   getLoadedModuleImpln, updateLoadedModuleImpln, updateLoadedModuleImplnM,
@@ -123,7 +123,8 @@ module AST (
   keyResourceBaseName, keyResourceName, keyFieldResourceSpec,
   indexResourceBaseName, indexResourceName, indexFieldResourceSpec,
   pointerName, unPointerName,
-  entityCreateName, entityGetterName, entitySetterName,
+  entityCreateName, entityGetterName, entityOffsetName, entitySetterName,
+  relationRelateName,
   showBody, showPlacedPrims, showStmt, showBlock, showProcDef,
   showProcIdentifier, showProcName,
   showModSpec, showModSpecs, showResources, showOptPos, showProcDefs, showUse,
@@ -948,6 +949,29 @@ addEntity vis placedEntityProto entityModifiers = do
 
     addKnownType currMod
 
+addRelation :: Visibility -> Placed ProcProto -> Compiler ()
+addRelation vis relationProto = do
+    mbRelEty <- getModuleImplementationField modRelationEntities
+
+    unless (isNothing mbRelEty)
+        $ errmsg (place relationProto) "Multiple relation declarations"
+
+    let relDeclParams = procProtoParams $ content relationProto
+        etyTypes = paramType . content <$> relDeclParams
+
+    unless (length etyTypes == 2)
+        $ nyi "Non-binary relations"
+
+    let [etyType0, etyType1] = etyTypes
+        name = procProtoName $ content relationProto
+
+    updateImplementation (\s -> s{ modRelationName = Just name })
+    updateImplementation (\s -> s{ modRelationEntities = Just (etyType0, etyType1)})
+
+    updateModule (\m -> m { modIsType = True })
+    currMod <- getModuleSpec
+    addKnownType currMod
+
 -- |Record that the specified type is known in the current module.
 addKnownType :: ModSpec -> Compiler ()
 addKnownType mspec = do
@@ -1619,9 +1643,17 @@ data ModuleImplementation = ModuleImplementation {
                                               -- ^reversed list of data
                                               -- constructors for this
                                               -- type, if it is a type
-    modEntity :: Maybe (Visibility, Placed ProcProto),
-    modEntityModDict :: Maybe EntityModifierDict,
-    modEntityResources :: Maybe (Set ResourceSpec),
+
+    modEntity :: Maybe (Visibility, Placed ProcProto), -- ^Entity constructor
+    modEntityModDict :: Maybe EntityModifierDict, -- ^Mapping between attributes
+                                                -- and their modifiers
+    modEntityResources :: Maybe (Set ResourceSpec), -- ^Resources used by entity
+    modEntityRelations :: Maybe [ModSpec], -- ^Relations related to this entity
+
+    modRelationName :: Maybe ProcName,
+    modRelationEntities :: Maybe (TypeSpec, TypeSpec), -- ^Entities that this
+                                                       -- relation relates
+
     modKnownTypes:: Map Ident (Set ModSpec),  -- ^Types visible to this module
     modKnownResources :: Map Ident (Set ResourceSpec),
                                               -- ^Resources visible to this mod
@@ -1634,8 +1666,10 @@ data ModuleImplementation = ModuleImplementation {
 emptyImplementation :: ModuleImplementation
 emptyImplementation =
     ModuleImplementation Set.empty Map.empty Nothing Map.empty Map.empty
-                         Map.empty Nothing Nothing Nothing Nothing Map.empty
-                         Map.empty Map.empty Set.empty Set.empty Nothing
+                         Map.empty
+                         Nothing Nothing Nothing Nothing Nothing Nothing Nothing
+                         Map.empty Map.empty Map.empty Set.empty Set.empty
+                         Nothing
 
 
 -- These functions hack around Haskell's terrible setter syntax
@@ -3846,6 +3880,9 @@ createName = "create"
 getName :: Ident
 getName = "get"
 
+offsetName :: Ident
+offsetName = "offset"
+
 setName :: Ident
 setName = "set"
 
@@ -3864,11 +3901,17 @@ entityCreateName = createName
 entityGetterName :: MergedAttrNames -> ProcName
 entityGetterName = entityProcName getName
 
+entityOffsetName :: MergedAttrNames -> ProcName
+entityOffsetName = entityProcName offsetName
+
 entitySetterName :: MergedAttrNames -> ProcName
 entitySetterName = entityProcName setName
 
 entityProcName :: Ident -> MergedAttrNames -> ProcName
 entityProcName command key = command ++ '_':key
+
+relationRelateName :: ProcName
+relationRelateName = "relate"
 
 ----------------------------------------------------------------
 --                      Showing Compiler State
