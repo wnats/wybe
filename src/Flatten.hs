@@ -52,6 +52,7 @@ import Control.Monad
 import Control.Monad.Trans.Class
 import Control.Monad.Trans.State
 import Control.Monad.Trans (lift,liftIO)
+import Util (apply2way)
 
 
 ----------------------------------------------------------------
@@ -437,17 +438,36 @@ flattenGenerator' (Lookup call) pos = do
         $ shouldnt "Lookup call should be a ProcCall. This should've been caught in Parser.hs"
 
     let ProcCall (First modSpec name _) _ resourceful args = content call
-        etyModSpec = modSpec ++ [name]
-        etyTmp = entityVariableName
+        modSpec' = modSpec ++ [name]
     
     unless resourceful
         $ lift $ errmsg pos "Lookup generators must be resourceful"
 
-    -- Check valid argument length    
-    (_, etyProto) <- lift $ trustFromJust
-                                ("Entity " ++ showModSpec etyModSpec ++ "does not exist")
-                            . modEntity
-                            <$> getLoadedModuleImpln etyModSpec
+    modImpl <- lift $ getLoadedModuleImpln modSpec'
+    let mbEtyProto = modEntity modImpl
+        mbRelTypes = modRelationEntities modImpl
+        isLookup = isJust mbEtyProto
+        isNavigation = isJust mbRelTypes
+
+    unless (isLookup || isNavigation)
+        $ lift $ errmsg pos $ showModSpec modSpec' ++ "is neither an entity nor a relation"
+    
+    when (isLookup && isNavigation)
+        $ lift $ errmsg pos $ showModSpec modSpec' ++ "is both an entity and a relation"
+
+    let etyProto = snd $ trustFromJust "flattenGenerator'" mbEtyProto
+
+    if isLookup
+    then
+        flattenLookup modSpec' etyProto args pos
+    else
+        flattenNavigation modSpec' args pos
+    where
+        isProcCall ProcCall{} = True
+        isProcCall _ = False
+
+flattenLookup :: ModSpec -> Placed ProcProto -> [Placed Exp] -> OptPos -> Flattener ([Placed Stmt] -> [Placed Stmt])
+flattenLookup etyModSpec etyProto args pos = do
     let attrs = paramName . content <$> procProtoParams (content etyProto)
         expArgsLen = length attrs + 1
         argsLen = length args
@@ -465,7 +485,7 @@ flattenGenerator' (Lookup call) pos = do
                     "Last argument of a lookup needs to be FlowOut"
 
     let etyVar = Set.findMin $ expOutputs etyArg
-    noteVarIntro etyTmp
+        etyTmp = entityVariableName
 
         -- foreign lpvm cast(#ety):count ~= 0:count
     let breakTest = Unplaced
@@ -490,9 +510,31 @@ flattenGenerator' (Lookup call) pos = do
                     ++ [filterCond body])
                     [Unplaced Break] Nothing Nothing Nothing
 
-    where
-        isProcCall ProcCall{} = True
-        isProcCall _ = False
+flattenNavigation :: ModSpec -> [Placed Exp] -> OptPos -> Flattener ([Placed Stmt] -> [Placed Stmt])
+flattenNavigation relModSpec args pos = do
+    unless (length args == 2)
+        $ nyi "Only binary relations are suppported at the moment"
+
+    let [arg0, arg1] = args
+        expFlowsOut = Set.null . expInputs . content
+
+    when (((==) `on` expFlowsOut) arg0 arg1)
+        $ nyi "Only one argument can flow out for now"
+
+    let (argIn, argOut, argOrd) = if expFlowsOut arg0
+                                  then (arg1, arg0, "0")
+                                  else (arg0, arg1, "1")
+        relName = last relModSpec
+        etysTmp = entityVariableName ++ "s"
+    noteVarIntro etysTmp
+    
+    -- !<relName>get_#<argOrd>(<argIn>, ?#etys)
+    flattenStmt
+        (ProcCall (regularModProc relModSpec $ entityGetterName $ specialName argOrd) Det True
+            [argIn, Unplaced $ varSet etysTmp]) pos Det
+    
+    -- Flatten: for ?<argout> in #etys
+    flattenGenerator' (In argOut (Unplaced $ varGet etysTmp)) pos
 
 lookupStrategy :: ModSpec -> [VarName] -> [Placed Exp] -> OptPos -> Flattener (Placed Stmt)
 lookupStrategy etyModSpec attrs pAttrArgs pos = do
@@ -503,6 +545,7 @@ lookupStrategy etyModSpec attrs pAttrArgs pos = do
         mbIndexAttrArg = List.find (liftM2 any isIndex (\k -> Map.findWithDefault [] k modDict) . fst) inAttrArgs
         nullEty = ForeignFn "lpvm" "cast" [] [Unplaced $ iVal 0]
         etyTmp = entityVariableName
+    noteVarIntro etyTmp
     -- Lookout for key
     if isJust mbKeyAttrArg
     then do
@@ -516,7 +559,7 @@ lookupStrategy etyModSpec attrs pAttrArgs pos = do
                       Det True [Unplaced $ varSet resTmp]) pos Det
         -- !cuckoo.lookup(resTmp,  get_<attr>, hash, `=`, <key>, ?#ety)
         flattenStmt (cuckooLookupProcCall resTmp attr arg entityVariableName) pos Det
-        -- Set #ety to null
+        -- Set #ety to null (only one entity in a key lookup)
         return $ move nullEty (varSet etyTmp) 
     else if isJust mbIndexAttrArg
     then do
@@ -593,28 +636,6 @@ lookupGetterFilter etyModSpec etyVar attr pArg
         filterAttr attrVar = Unplaced
                                 $ ProcCall (regularProc "=") SemiDet False
                                     [Unplaced $ varGet attrVar, pArg]
-
-
-
-
-    -- TODO: Check for indicies
-    -- foreign llvm move(x, ?tmp)
-    -- tmp <- tempVar
-    -- orig <- flattenPExp xs
-    -- emit pos $ ForeignCall "llvm" "move" [] [orig, Unplaced $ varSet tmp]
-    -- modify (\s -> s {defdVars = Set.insert tmp $ defdVars s})
-
-
--- flattenGenerator :: Placed Generator -> Flattener (Placed Stmt, [Placed Stmt])
--- flattenGenerator gen = uncurry flattenGenerator' $ unPlace gen
-
--- flattenGenerator' :: Generator -> OptPos -> Flattener (Placed Stmt, [Placed Stmt])
--- flattenGenerator' (In x xs) pos = do
---     temp <- tempVar
---     origs =flattenPExp xs
---     nyi "not yet"
-
--- flattenGenerator' _ _ = undefined
 
 -- | Flatten an assignment of the specified expression (`value`) to the
 -- specified variable, which is specified both as a name and as an output

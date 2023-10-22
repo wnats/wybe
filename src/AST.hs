@@ -3357,7 +3357,7 @@ data Generator
              genExp :: Placed Exp -- ^ The generator being looped over
         } 
       | Lookup {
-            entityLookupCall :: Placed Stmt  -- ^ Must be a ProcCall
+            lookupCall :: Placed Stmt  -- ^ Must be a ProcCall
         } deriving (Eq,Ord,Generic)
 
 instance Show Generator where

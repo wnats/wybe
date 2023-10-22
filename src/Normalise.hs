@@ -1421,6 +1421,7 @@ entityCreateItem vis entityName typeSpec params fields size pos keyNames =
                         : entityFillAttrsStmts typeSpec attrFieldInfos pos
                             ++ entityFillNextPtrStmts typeSpec nextPtrFieldInfo pos
                             ++ entityFillIndexPtrStmts entityName typeSpec indexFieldInfos pos
+                            ++ entityFillRelStmts entityName typeSpec relFieldInfos pos
                             ++ (cuckooInsertStmt entityName pos <$> keyNames)
 
 -- | Generate getter code for an entity
@@ -1588,6 +1589,18 @@ entityFillIndexPtrStmts etyName typeSpec indexFieldInfos pos =
                         "entityFillIndexPtrStmts: no '#' prefix"
                         . stripPrefix [specialChar]
 
+entityFillRelStmts :: ProcName -> TypeSpec -> [FieldInfo] -> OptPos -> [Placed Stmt]
+entityFillRelStmts etyName typeSpec relFieldInfos pos =
+    List.map
+        (\(FieldInfo _ _ _ ty _ offset _) ->
+            -- foreign lpvm unsafe_mutate(#ety, <offset>, [], !db)
+            maybePlace (ForeignCall "lpvm" "unsafe_mutate" []
+            [varGetTyped entityVariableName typeSpec `maybePlace` pos,
+                Unplaced $ iVal offset,
+                Unplaced $ Fncall [] "[]" False [] `withType` listType ty,
+                unplacedVarGetSetDb]) pos)
+        relFieldInfos
+
 ----------------------------------------------------------------
 --       Proc calls to wybelibs/cuckoo.wybe for hash tables
 ----------------------------------------------------------------
@@ -1621,22 +1634,6 @@ cuckooEntityDeleteStmt etyName pos key =
         ]
         `maybePlace` pos
 
--- | Proc call to lookup on an entity based on an indexed attribute
---   XXX Revamp for multi-keyed attributes (OLD)
--- cuckooPopProcCall :: Ident -> OptPos -> OptPos -> Placed Stmt
--- cuckooPopProcCall key keyPos pos =
---     -- !pop(index#<key>,  get#<key>, hash, `=`, <key>, ?#result, ?#success)
---     ProcCall (regularModProc cuckooModSpec "pop") Det True
---         [Unplaced $ varGetSet (indexResourceName key) Ordinary,
---          Unplaced $ varGet $ entityGetterName key,
---          Unplaced $ varGet hashProcName,
---          Unplaced $ varGet "=",
---          varGet key `maybePlace` keyPos,
---          varSet outputVariableName `maybePlace` pos,
---          varSet outputStatusName `maybePlace` pos
---         ]
---         `maybePlace` pos
-
 -- | Proc call to insert an entity to the hash table on a specified *key*
 --   attribute
 --   XXX Revamp for multi-keyed attributes
@@ -1650,31 +1647,6 @@ cuckooInsertStmt etyName pos key =
          varGet entityVariableName `maybePlace` pos
         ]
         `maybePlace` pos
-
--- | Generate procs to lookup an entity
--- entityLookupItem :: Visibility -> ProcName -> TypeSpec -> [Placed Param]
---                       -> [FieldInfo] -> Int -> OptPos -> Item
--- entityLookupItem vis entityName typeSpec params fields size pos =
---     let procName = entityName
---         outTypeSpec = TypeSpec ["wybe"] "list" [typeSpec]
---         maybeCurrModType = TypeSpec [] "maybe" [TypeSpec [] currentModuleAlias []]
---         -- TODO: Prepend "m#" to the param names, to indicate they are maybes instead of "m_"
---         protoParams = (Param outputVariableName outTypeSpec ParamOut Ordinary `maybePlace` pos) : (placedApply (\p -> maybePlace p {paramName = "m_"++paramName p, paramType = maybeCurrModType, paramFlowType=Ordinary}) <$> params)
---         isJust pName pPos = Unplaced $ ProcCall (regularProc "is_just") SemiDet False [varGet pName `maybePlace` pPos]
---         getAttr pName = Unplaced $ ProcCall (regularProc pName) Det True [Unplaced $ varGet "ety", Unplaced $ varSet $ "exp_" ++ pName]
---         testAttrNotEqual pName pPos = Unplaced $ ProcCall (regularProc "~=") SemiDet False [Unplaced $ varSet $ "exp_" ++ pName, Unplaced $ Fncall [] "value" False [varGet pName `maybePlace` pPos]]
---         nextIfAttrNotEqual pName pPos = Unplaced $ Cond (testAttrNotEqual ("m_"++pName) pPos) [Unplaced Next] [Unplaced Nop] Nothing Nothing Nothing
---         nextIfJustAndAttrNotEqual pName pPos = Unplaced $ Cond (isJust ("m_"++pName) pPos) [getAttr pName, nextIfAttrNotEqual pName pPos] [Unplaced Nop] Nothing Nothing Nothing
---         etyChecks = placedApply (nextIfJustAndAttrNotEqual . paramName) <$> params
---         prependEtyToRes = Unplaced $ ProcCall (regularProc "[|]") Det False [Unplaced $ varGet "ety", varGet outputVariableName `maybePlace` pos, varSet outputVariableName `maybePlace` pos]
---         generatorEty = Unplaced $ In (Unplaced $ Var "ety" ParamOut Ordinary) (Unplaced $ Var "std_lookup" ParamIn Ordinary)
---         iterateTable = Unplaced $ For [generatorEty] $ etyChecks ++ [prependEtyToRes]
---         initialiseOut = Unplaced $ ProcCall (regularProc "[]") Det False [Unplaced $ varSet outputVariableName]
---         body = [initialiseOut, iterateTable]
---     in  ProcDecl vis (inlineModifiers RegularProc Det)
---             (ProcProto procName protoParams $ Set.fromList [memResFlowSpec, luResFlowSpec])
---             [initialiseOut, iterateTable]
---             pos
 
 ----------------------------------------------------------------
 --              Relation Items (Proc Declarations)
@@ -1706,8 +1678,8 @@ relationRelateItem relName ety0 ety1 =
         ety1Exp = Unplaced $ varGetTyped rightName ety1
         ety1Rel = relName `specialName2` "0"
 
-        -- !get_<relName>#1(#left, <relName>#1:list(<ety1>))
-        get0 = ProcCall (regularProc $ entityGetterName ety0Rel)
+        -- !get_#1(#left, <relName>#1:list(<ety1>))
+        get0 = ProcCall (regularProc $ entityGetterName $ specialName "1")
                 Det True
                 [ety0Exp,
                  Unplaced $ varSetTyped ety0Rel $ listType ety1
@@ -1720,8 +1692,8 @@ relationRelateItem relName ety0 ety1 =
                  Unplaced $ varGetSet dbResourceName Ordinary
                 ]
 
-        -- !get_<relName>#0(#right, <relName>#0:list(<ety0>))
-        get1 = ProcCall (regularProc $ entityGetterName ety1Rel)
+        -- !get_#0(#right, <relName>#0:list(<ety0>))
+        get1 = ProcCall (regularProc $ entityGetterName $ specialName "0")
                 Det True
                 [ety1Exp,
                  Unplaced $ varSetTyped ety1Rel $ listType ety0
@@ -1742,7 +1714,7 @@ relationGetItem relName etyInType etyOutType order =
         [Unplaced stmt]
         Nothing
     where
-        procName = entityGetterName relName `specialName2` show order
+        procName = entityGetterName $ specialName $ show order
         protoParams = [Unplaced $ Param entityVariableName etyInType ParamIn Ordinary,
                        Unplaced $ Param outputVariableName (listType etyOutType) ParamOut Ordinary]
         resSet = Set.singleton $ ResourceFlowSpec dbResourceSpec ParamInOut
