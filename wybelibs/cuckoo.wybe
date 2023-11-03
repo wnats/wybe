@@ -1,6 +1,6 @@
 # Constants
 def EMPTY = 0:count
-pub def INITIAL_TABLE_SIZE:int = 163:int
+pub def INITIAL_TABLE_SIZE:int = 17:int
 def N_TABLE = 2:int
 def MAX_EVICTION = 100:count
 def BIG_PRIME = 524287:count  # to generate the second hash function

@@ -1372,7 +1372,7 @@ entityCreateItem vis entityName typeSpec params fields size pos keyNames =
         (ProcProto procName protoParams resSet)
         (initEtyStmt:lookupStmts
             ++ [Unplaced
-                $ Cond testEtyLookupStmt createStmts []
+                $ Cond testEtyLookupStmt createStmts [errorStmt]
                     Nothing Nothing Nothing])
         pos
     where
@@ -1423,6 +1423,8 @@ entityCreateItem vis entityName typeSpec params fields size pos keyNames =
                             ++ entityFillIndexPtrStmts entityName typeSpec indexFieldInfos pos
                             ++ entityFillRelStmts entityName typeSpec relFieldInfos pos
                             ++ (cuckooInsertStmt entityName pos <$> keyNames)
+
+        errorStmt = Unplaced $ ProcCall (regularModProc ["wybe", "control"] "exit") Det True [Unplaced $ iVal 1]
 
 -- | Generate getter code for an entity
 entityGetItem :: Visibility -> TypeSpec -> Int -> FieldInfo -> Item
