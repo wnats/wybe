@@ -135,12 +135,12 @@ normaliseItem (EntityDecl vis placedEntityProto entityMods pos) = do
     -- Prepare the cuckoo tables
     let cuckooTableType = arrayType etyType
         cuckooTableCount = 2
-        initCuckooTableSize = 17 * cuckooTableCount
+        -- initCuckooTableSize = 163 * cuckooTableCount
         initCuckooTable =
             Unplaced
             $ Fncall ["wybe", "array"] "array" False
                 [nullEntity,
-                 Unplaced $ IntValue initCuckooTableSize
+                 Unplaced $ Fncall ["cuckoo"] "INITIAL_TABLE_SIZE" False []
                 ]
 
     -- Handle key and index resources

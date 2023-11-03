@@ -43,6 +43,7 @@ pub def hash(x:count, ?h_x:count) use tab_hash {
 }
 
 pub def hash(x:int, ?h_x:count) use tab_hash {
+    #|
     ?h_x = 0:count
     ?table_size = tab_hash^length
     for ?i in 0..8 {
@@ -51,6 +52,8 @@ pub def hash(x:int, ?h_x:count) use tab_hash {
         ?h_x = xor(h_x, unsafe_get(tab_hash, (256*i + last_8_bits) % table_size))
         ?x = logical_bitshift(x, 8)
     }
+    |#
+    ?h_x = foreign lpvm cast(x)
 }
 
 pub def hash(x:string, ?h_x: count) use tab_hash {
