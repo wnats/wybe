@@ -1509,18 +1509,35 @@ entitySetItem etyName vis etyType etySize modDict (FieldInfo fieldName pos _ fie
 entityKeyLookupItem :: Visibility -> ProcName -> TypeSpec -> [Placed Param] -> OptPos -> MergedAttrNames -> Item
 entityKeyLookupItem vis etyName etyType params pos keyName =
     ProcDecl vis (inlineModifiers (GetterProc etyName etyType) Det)
-        (ProcProto etyName lookupParams resSet) [lookupCall] pos
+        (ProcProto etyName lookupParams resSet) (lookupCall:nonKeyGetters) pos
     where
         (etyOutVar, lookupCall) = keyLookupStmt etyName params keyName
-        keyParam = trustFromJust "keyLookupStmt"
-                    $ List.find ((==keyName) . paramName . content) params
-        lookupParams = [keyParam,
-                        Param etyOutVar etyType ParamOut Ordinary
-                        `maybePlace` pos]
+
+        keyAttrs = unMergeAttrNames keyName
+        nonKeyParams = List.filter ((`notElem` keyAttrs) . paramName . content) params
+        keyParams = placedApply
+                    (\p -> maybePlace p {paramFlow=
+                                            if paramName p `elem` keyAttrs
+                                            then ParamIn else ParamOut
+                                         ,paramFlowType=Ordinary})
+                    <$> params
+        lookupParams = keyParams
+                        ++ [Param etyOutVar etyType ParamOut Ordinary
+                            `maybePlace` pos]
+
         resList = [ResourceFlowSpec dbResourceSpec ParamInOut,
                    ResourceFlowSpec (keyFieldResourceSpec etyName keyName) ParamInOut,
                    ResourceFlowSpec tabHashResourceSpec ParamIn]
         resSet = Set.fromList resList
+
+        nonKeyGetters = (\pParam ->
+                            let (param, pos) = unPlace pParam
+                                pParam' = placedApply (\p -> maybePlace p{paramFlow=ParamOut}) pParam
+                            in
+                                ProcCall (regularProc $ entityGetterName $ paramName param)
+                                Det True [Unplaced $ varGet etyOutVar, placedParamToVar pParam']
+                                `maybePlace` pos)
+                        <$> nonKeyParams
 
 ----------------------------------------------------------------
 --       Helper Functions for entityCreateItem
