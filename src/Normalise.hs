@@ -1302,11 +1302,14 @@ entityItems typeSpec info@(CtorInfo entityName paramInfos vis pos 0 bits) modDic
                     <$> attrFieldInfos ++ nextPtrFieldInfo:indexFieldInfos
         offsetItems = entityOffsetItem vis typeSpec <$> relFieldInfos
 
+        lookupItems = entityKeyLookupItem vis entityName typeSpec params pos <$> keyNames
+
         -- TODO: Don't allow key attributes to be set
         setItems = entitySetItem entityName vis typeSpec size modDict <$> fields
 
         itemsList = getLastEtyResItem:getKeyResItems ++ getIndexResItems
                         ++ createItem:getItems ++ offsetItems ++ setItems
+                        ++ lookupItems
 
     return (Address, itemsList)
 
@@ -1387,7 +1390,7 @@ entityCreateItem vis entityName typeSpec params fields size pos keyNames =
         nullEty = ForeignFn "lpvm" "cast" [] [Unplaced $ iVal 0] `withType` typeSpec
         initEtyStmt = move nullEty $ varSet entityVariableName
 
-        (etyLookupVars, lookupStmts) = unzip $ keyLookupStmts entityName params <$> keyNames
+        (etyLookupVars, lookupStmts) = unzip $ keyLookupStmt entityName params <$> keyNames
 
         etyIsNotNullStmt etyVar =
             Unplaced
@@ -1400,7 +1403,6 @@ entityCreateItem vis entityName typeSpec params fields size pos keyNames =
          nextPtrFieldInfo,
          indexFieldInfos,
          relFieldInfos) = partitionFieldInfos fields
-        -- TODO: Initialise relFieldInfos to []
 
         keyResFlowSpecs =
             flip ResourceFlowSpec ParamInOut . keyFieldResourceSpec entityName
@@ -1502,6 +1504,24 @@ entitySetItem etyName vis etyType etySize modDict (FieldInfo fieldName pos _ fie
         -- !cuckoo.entity_insert(!index#<key>, get#key, hash, `=`, #ety, set##<key>)
         insertStmts = cuckooEntityInsertStmt etyName pos <$> indexKeys
 
+-- | Generate specialised lookup code if the lookup is on a key attribute
+--   TODO: Generalise this for multi-valued keys
+entityKeyLookupItem :: Visibility -> ProcName -> TypeSpec -> [Placed Param] -> OptPos -> MergedAttrNames -> Item
+entityKeyLookupItem vis etyName etyType params pos keyName =
+    ProcDecl vis (inlineModifiers (GetterProc etyName etyType) Det)
+        (ProcProto etyName lookupParams resSet) [lookupCall] pos
+    where
+        (etyOutVar, lookupCall) = keyLookupStmt etyName params keyName
+        keyParam = trustFromJust "keyLookupStmt"
+                    $ List.find ((==keyName) . paramName . content) params
+        lookupParams = [keyParam,
+                        Param etyOutVar etyType ParamOut Ordinary
+                        `maybePlace` pos]
+        resList = [ResourceFlowSpec dbResourceSpec ParamInOut,
+                   ResourceFlowSpec (keyFieldResourceSpec etyName keyName) ParamInOut,
+                   ResourceFlowSpec tabHashResourceSpec ParamIn]
+        resSet = Set.fromList resList
+
 ----------------------------------------------------------------
 --       Helper Functions for entityCreateItem
 ----------------------------------------------------------------
@@ -1516,21 +1536,21 @@ partitionFieldInfos fieldInfos =
         (indexFieldInfos, relFieldInfos) =
             span (isPrefixOf [specialChar] . fldName) rest
 
-keyLookupStmts :: ProcName -> [Placed Param] -> MergedAttrNames -> (VarName, Placed Stmt)
-keyLookupStmts etyName params lookupKey = (etyOutVar, lookupCall)
+keyLookupStmt :: ProcName -> [Placed Param] -> MergedAttrNames -> (VarName, Placed Stmt)
+keyLookupStmt etyName params lookupKey = (etyOutVar, lookupCall)
     where
         keyAttrs = unMergeAttrNames lookupKey
         keyResVar = keyResourceName etyName lookupKey
         -- for now assume no multi-valued keys
         keyVar = placedParamToVar
-                    $ trustFromJust "keyLookupStmts"
+                    $ trustFromJust "keyLookupStmt"
                     $ List.find ((==lookupKey) . paramName . content) params
         etyOutVar = entityVariableName `specialName2` lookupKey
         lookupCall = Unplaced $ cuckooLookupProcCall keyResVar lookupKey keyVar etyOutVar
 
 cuckooLookupProcCall :: VarName -> MergedAttrNames -> Placed Exp -> VarName -> Stmt
 cuckooLookupProcCall resVar lookupKey key etyOut =
-    -- !cuckoo.lookup(<resVar>,  get_<attr>, hash, `=`, <key>, ?#ety)
+    -- !cuckoo.lookup(<resVar>,  get_<key>, hash, `=`, <key>, ?<etyOut>)
     ProcCall (regularModProc cuckooModSpec "lookup") Det True
         [Unplaced $ varGet resVar,
          Unplaced $ varGet $ entityGetterName lookupKey,
