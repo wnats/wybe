@@ -1,0 +1,11 @@
+# purpose: Standard Clock Library to get CPU clock time (not wall time)
+# since  : 0.1
+
+def CLOCKS_PER_SEC:float = 1000000.0
+
+pub def {semipure} clock(?clk:int) {
+    foreign c {impure} clock(?clk)
+}
+
+pub def time_elapsed(start:int, end:int):float =
+    (foreign llvm sitofp(end) - foreign llvm sitofp(start)) / CLOCKS_PER_SEC
