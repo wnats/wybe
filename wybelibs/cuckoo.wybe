@@ -46,7 +46,7 @@ def next_prime(cur:int):int = nxt where {
     if { nxt = 0 :: !error("Cuckoo: Ran out of prime table sizes") }
 }
 
-pub def insert(!cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{resource}(K,?count), val:V) {
+pub def {noinline} insert(!cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{resource}(K,?count), val:V) {
     ?i_table = 0:int
     ?eviction_cnt = 0:count
     ?t_length = cuckoo_table^length / 2:int
@@ -77,7 +77,8 @@ pub def insert(!cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{resource}
     if { cycle_exists :: ?nxt = next_prime(t_length); !error("Cycle") }
 }
 
-pub def lookup(cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{resource}(K,?count), eq:{test}(K,K), key:K, ?res:V) {
+pub def {noinline} lookup(cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{resource}(K,?count), eq:{test}(K,K), key:K, ?res:V) {
+    # !logmsg(foreign lpvm cast(key):int); !lognl
     ?t_length = cuckoo_table^length / 2:int
     ?res = foreign lpvm cast(EMPTY)
 
@@ -104,7 +105,7 @@ pub def lookup(cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{resource}(
     }
 }
 
-pub def pop(!cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{resource}(K,?count), eq:{test}(K,K), key:K, ?res:V) {
+pub def {noinline} pop(!cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{resource}(K,?count), eq:{test}(K,K), key:K, ?res:V) {
     ?t_length = cuckoo_table^length / 2:int
     ?res = foreign lpvm cast(EMPTY)
 
@@ -132,7 +133,7 @@ pub def pop(!cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{resource}(K,
     }
 }
 
-pub def delete(!cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{resource}(K,?count), eq:{test}(K,K), key:K) {
+pub def {noinline} delete(!cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{resource}(K,?count), eq:{test}(K,K), key:K) {
     ?t_length = cuckoo_table^length / 2:int
 
     for ?i_table in 0..N_TABLE {
@@ -155,14 +156,14 @@ pub def delete(!cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{resource}
     }
 }
 
-pub def entity_insert(!cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{resource}(K,?count), eq:{test}(K,K), ety:V, set_next:{resource}(V,V)) {
+pub def {noinline} entity_insert(!cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{resource}(K,?count), eq:{test}(K,K), ety:V, set_next:{resource}(V,V)) {
     !val2key(ety, ?key)
     !pop(!cuckoo_table, val2key, hash, eq, key, ?res)
     !set_next(ety, res)
     !insert(!cuckoo_table, val2key, hash, ety)
 }
 
-pub def entity_delete(!cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{resource}(K,?count), eq:{test}(K,K), ety:V, get_next:{resource}(V,?V), set_next:{resource}(V,V)) {
+pub def {noinline} entity_delete(!cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{resource}(K,?count), eq:{test}(K,K), ety:V, get_next:{resource}(V,?V), set_next:{resource}(V,V)) {
     !val2key(ety, ?key)
     !lookup(cuckoo_table, val2key, hash, eq, key, ?res)
     if {
