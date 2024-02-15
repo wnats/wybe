@@ -17,31 +17,31 @@ module top-level code > public {inline,semipure} (0 calls)
     unbranch_bug.#cont#3<0>(0:wybe.list(5))<{<<wybe.io.io>>}; {<<wybe.io.io>>}; {}> #1 @unbranch_bug:nn:nn
 
 
-proc #cont#1 > {inline} (1 calls)
+proc #cont#1 > {inline,semipure} (1 calls)
 0: unbranch_bug.#cont#1<0>
 #cont#1()<{}; {}; {}>:
   AliasPairs: []
   InterestingCallProperties: []
 
 
-proc #cont#2 > {inline} (1 calls)
+proc #cont#2 > {inline,semipure} (1 calls)
 0: unbranch_bug.#cont#2<0>
 #cont#2()<{}; {}; {}>:
   AliasPairs: []
   InterestingCallProperties: []
 
 
-proc #cont#3 > (2 calls)
+proc #cont#3 > {semipure} (2 calls)
 0: unbranch_bug.#cont#3<0>
 #cont#3(tmp#0##0:wybe.list(5) <{}; {}; {0}>)<{<<wybe.io.io>>}; {<<wybe.io.io>>}; {}>:
   AliasPairs: []
   InterestingCallProperties: []
-    foreign llvm icmp_ne(tmp#0##0:wybe.int, 0:wybe.int, ?tmp#6##0:wybe.bool)
-    case ~tmp#6##0:wybe.bool of
+    foreign llvm icmp_ne(tmp#0##0:wybe.int, 0:wybe.int, ?tmp#7##0:wybe.bool) @unbranch_bug:nn:nn
+    case ~tmp#7##0:wybe.bool of
     0:
 
     1:
-        foreign lpvm access(~tmp#0##0:wybe.list(T), 8:wybe.int, 16:wybe.int, 0:wybe.int, ?tmp#0##1:wybe.list(5)) @list:nn:nn
+        foreign lpvm access(~tmp#0##0:wybe.list(T), 8:wybe.int, 16:wybe.int, 0:wybe.int, ?tmp#0##1:wybe.list(5)) @unbranch_bug:nn:nn
         unbranch_bug.#cont#3<0>(~tmp#0##1:wybe.list(5))<{<<wybe.io.io>>}; {<<wybe.io.io>>}; {}> #1 @unbranch_bug:nn:nn
 
 
