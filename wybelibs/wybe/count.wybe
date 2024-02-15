@@ -72,6 +72,15 @@ pub def xor(x:_, y:_):_ = foreign llvm xor(x, y)
 # Bit-wise and.
 pub def and(x:_, y:_):_ = foreign llvm and(x, y)
 
+# Logarithm base 2.
+pub def log2(x:_):_ =
+    if {
+        x <= 1:_ ::
+            0:_
+    |   else ::
+            1:_ + log2(logical_bitshift(x, 1:_))
+    }
+
 ## Comparisons
 
 # Equality and disequality.

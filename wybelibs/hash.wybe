@@ -31,38 +31,39 @@ pub def generate_lookup_table use !random, ?tab_hash {
     }
 }
 
-pub def hash(x:count, ?h_x:count) use tab_hash {
+pub def hash(x:count, bias:count, ?h_x:count) use tab_hash {
     ?h_x = 0:count
     ?table_size = tab_hash^length
     for ?i in 0..8 {
         # Cast to int since unsafe_get accepts int, not count
         ?last_8_bits = foreign lpvm cast(and(x, 255:count)):int
-        ?h_x = xor(h_x, unsafe_get(tab_hash, (256*i + last_8_bits) % table_size))
+        ?idx = 256*i + last_8_bits + foreign lpvm cast(bias)
+        ?h_x = xor(h_x, unsafe_get(tab_hash, idx % table_size))
         ?x = logical_bitshift(x, 8:count)
     }
 }
 
-pub def hash(x:int, ?h_x:count) use tab_hash {
-    #|
+pub def hash(x:int, bias:count, ?h_x:count) use tab_hash {
+
     ?h_x = 0:count
     ?table_size = tab_hash^length
     for ?i in 0..8 {
         # Cast to int since unsafe_get accepts int, not count
         ?last_8_bits = and(x, 255)
-        ?h_x = xor(h_x, unsafe_get(tab_hash, (256*i + last_8_bits) % table_size))
+        ?idx = 256*i + last_8_bits + foreign lpvm cast(bias)
+        ?h_x = xor(h_x, unsafe_get(tab_hash, idx % table_size))
         ?x = logical_bitshift(x, 8)
     }
-    |#
-    ?h_x = foreign lpvm cast(x)
+
+    # ?h_x = foreign lpvm cast(x)
 }
 
-pub def hash(x:string, ?h_x: count) use tab_hash {
+pub def hash(x:string, bias:count, ?h_x: count) use tab_hash {
     ?h_x = 0:count
     ?table_size = tab_hash^length
-    ?i = 0
-    for ?chr in x {
-        ?h_x = xor(h_x, unsafe_get(tab_hash, (256*i + ord(chr) + i/8) % table_size))
-        !i += 1
+    for ?i in 0..x^length; ?chr in x {
+        ?idx = (256*(i % 8) + ord(chr) + foreign lpvm cast(bias) + i/8)
+        ?h_x = xor(h_x, unsafe_get(tab_hash, idx % table_size))
     }
 }
 

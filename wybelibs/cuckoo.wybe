@@ -1,97 +1,200 @@
+constructor (V) cuckoo(table:table(V), item_count:count, rehash_count:count)
+
+use db, logging
+
+type table (T) {
+    pub table(length:count, raw_data:raw_array)
+
+    pub def WORD_SIZE_BYTES:count = foreign lpvm cast(word_size_bytes)
+
+    pub def N_TABLE:count = 2:count
+
+    def TABLE_SIZES = [17:count, 37:count]
+    #|
+    def TABLE_SIZES = [17:count,
+                       37:count,
+                       79:count,
+                       163:count,
+                       331:count,
+                       673:count,
+                       1361:count,
+                       2729:count,
+                       5471:count,
+                       10949:count,
+                       21911:count,
+                       43853:count,
+                       87719:count,
+                       175447:count,
+                       350899:count,
+                       701819:count,
+                       1403641:count,
+                       2807303:count,
+                       5614657:count,
+                       11229331:count,
+                       22458671:count,
+                       44917381:count,
+                       89834777:count,
+                       179669557:count,
+                       359339171:count]
+    |#
+
+    def next_prime(cur:count):count = nxt where {
+        ?nxt = 0:count
+        for ?size in TABLE_SIZES {
+            if {
+                size > cur ::
+                    ?nxt = size
+                    break
+            |   else ::
+                    ?nxt = nxt
+            }
+        }
+        if { nxt = 0:count :: !error("Cuckoo: Ran out of prime table sizes") }
+    }
+    
+    pub def empty_table(len:count):_(T) = tab where {
+        ?size = len * WORD_SIZE_BYTES * N_TABLE
+        foreign lpvm alloc(size, ?data)
+        ?offset = 0:count
+        do {
+            while offset < size
+            foreign lpvm mutate(data, ?data, offset, 1, size, 0, foreign lpvm cast(EMPTY))
+            !offset += WORD_SIZE_BYTES
+        }
+        ?tab = table(len, data)
+    }
+
+    pub def resize_reset(!tab:_(T)) {
+        ?tab = empty_table(next_prime(tab^length))
+    }
+
+    pub def get(tab:_(T), idx:count, ?val:T) use !db {
+        foreign lpvm access(tab^raw_data, idx * WORD_SIZE_BYTES, WORD_SIZE_BYTES, 0, ?val, !db)
+    }
+
+    pub def set(tab:_(T), idx:count, val:T) use !db {
+        foreign lpvm unsafe_mutate(tab^raw_data, idx * WORD_SIZE_BYTES, val, !db)
+    }
+
+    pub def print_table(tab:_(T), val2key:{resource}(T,?K), printer:{resource}(K)) use !io, !db {
+        !println("Cuckoo Table:")
+        ?len = foreign lpvm cast(tab^length)
+
+        for ?i in 0..len*2 {
+            !print(i % len)
+            !print(": ")
+            !get(tab, foreign lpvm cast(i), ?val)
+            if {
+                foreign lpvm cast(val) = EMPTY :: !println("NULL")
+            |   else :: !val2key(val, ?key); !printer(key); !nl
+            }
+        }
+    }
+}
+
+def get(cuckoo:_(V), idx:count, ?val:V) use !db {
+    !get(cuckoo^table, idx, ?val)
+}
+
+def set(cuckoo:_(V), idx:count, val:V) use !db {
+    !set(cuckoo^table, idx, val)
+}
+
+def length(cuckoo:_(V)):count = cuckoo^table^length
+
+def resize_reset(!cuckoo:_(V)) {
+    resize_reset(!cuckoo^table)
+    !cuckoo^item_count = 0:count
+}
+
+def get_vals(cuckoo:_(V), ?vals:array(V)) use !db {
+    ?data = cuckoo^table^raw_data
+    ?i = 0
+    ?vals = array(foreign lpvm cast(EMPTY), cuckoo^item_count)
+    ?raw = vals^raw_data
+    for ?idx in 0..foreign lpvm cast(N_TABLE*cuckoo^table^length) {
+        !get(cuckoo, foreign lpvm cast(idx), ?val)
+        unless foreign lpvm cast(val) = EMPTY
+        foreign lpvm mutate(raw, ?raw, i * word_size_bytes, 1,
+                            vals^length * word_size_bytes , 0, val)
+        incr(!i)
+    }
+    !vals^raw_data = raw
+}
+
 # Constants
 def EMPTY = 0:count
-pub def INITIAL_TABLE_SIZE:int = 350899:int
-def N_TABLE = 2:int
-def MAX_EVICTION = 100:count
-def BIG_PRIME = 524287:count  # to generate the second hash function
+pub def INITIAL_TABLE_SIZE:count = 17:count
 
-# List of prime table sizes, roughly doubled each time
-def TABLE_SIZES = [17,
-                   37,
-                   79,
-                   163,
-                   331,
-                   673,
-                   1361,
-                   2729,
-                   5471,
-                   10949,
-                   21911,
-                   43853,
-                   87719,
-                   175447,
-                   350899,
-                   701819,
-                   1403641,
-                   2807303,
-                   5614657,
-                   11229331,
-                   22458671,
-                   44917381,
-                   89834777,
-                   179669557,
-                   359339171]
+pub def cuckoo(size:count):_(V) =
+    cuckoo(empty_table(size), 0:count, 0:count)
 
-def next_prime(cur:int):int = nxt where {
-    ?nxt = 0
-    for ?size in TABLE_SIZES {
-        if {
-            size > cur ::
-                ?nxt = size
-                break
-        |   else ::
-                ?nxt = nxt
-        }
-    }
-    if { nxt = 0 :: !error("Cuckoo: Ran out of prime table sizes") }
-}
-
-pub def {noinline} insert(!cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{resource}(K,?count), val:V) {
-    ?i_table = 0:int
-    ?eviction_cnt = 0:count
-    ?t_length = cuckoo_table^length / 2:int
-    ?cycle_exists = true
-    
+def {noinline} try_insert(cuckoo:_(V), val2key:{resource}(V,?K), hash:{resource}(K,count,?count), !val:V) use !db {
+    ?eviction = 0:count
+    ?i_tab = 0:count
+    ?tab_len = cuckoo^length
+    ?max_eviction = log2(tab_len) + 10:count
     do {
-        while eviction_cnt < MAX_EVICTION
-
-        # Compute the hash index
+        while eviction <= max_eviction
+        
+        # compute the hash location
         !val2key(val, ?key)
-        !hash(key, ?h_key)
-        ?h_key_mod = h_key % foreign lpvm cast(t_length):count
-        if { i_table ~= 0 :: !h_key_mod *= BIG_PRIME }
-        ?h_idx = h_key_mod % foreign lpvm cast(t_length):count
+        !hash(key, cuckoo^rehash_count*2:count + i_tab, ?h_key)
+        ?idx = tab_len * i_tab + h_key % tab_len
 
-        # Evict the current resident of the hash index
-        ?t_idx = t_length*i_table + foreign lpvm cast(h_idx)
-        ?vic = unsafe_get(cuckoo_table, t_idx)
-        unsafe_update(!cuckoo_table, t_idx, val)
+        # evict the current resident of the hash location
+        !get(cuckoo, idx, ?vic)
+        !set(cuckoo, idx, val)
 
         # Prepare for the next eviction cycle (if eviction happens on this cycle)
-        if { foreign lpvm cast(vic) = EMPTY :: ?cycle_exists = false; ?val = val; break
-        |    else                           :: ?cycle_exists = true; ?val = vic; incr(!eviction_cnt)
-        }
-        ?i_table = (i_table + 1) % N_TABLE
+        ?val = vic
+        until foreign lpvm cast(vic) = EMPTY
+        incr(!eviction)
+        ?i_tab = (i_tab + 1:count) % N_TABLE
     }
-
-    if { cycle_exists :: ?nxt = next_prime(t_length); !error("Cycle") }
 }
 
-pub def {noinline} lookup(cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{resource}(K,?count), eq:{test}(K,K), key:K, ?res:V) {
-    ?t_length = cuckoo_table^length / 2:int
+pub def {noinline} insert(!cuckoo:_(V), val2key:{resource}(V,?K), hash:{resource}(K,count,?count), val:V) use !db {
+    !try_insert(cuckoo, val2key, hash, !val)
+    if {
+        foreign lpvm cast(val) ~= EMPTY ::
+            !rehash(!cuckoo, val2key, hash, val)
+    }
+    incr(!cuckoo^item_count)
+}
+
+def {noinline} rehash(!cuckoo:_(V), val2key:{resource}(V,?K), hash:{resource}(K,count,?count), evicted:V) use !db {
+    !get_vals(cuckoo, ?vals)
+
+    do {
+        resize_reset(cuckoo)
+        incr(!cuckoo^rehash_count)
+
+
+        ?val = evicted
+        !try_insert(!cuckoo, val2key, hash, !val)
+        for ?val in vals {
+            !try_insert(!cuckoo, val2key, hash, !val)
+            while foreign lpvm cast(val) = EMPTY
+            incr(!cuckoo^item_count)
+        }
+        
+        until foreign lpvm cast(val) = EMPTY
+    }
+}
+
+pub def {noinline} lookup(cuckoo:_(V), val2key:{resource}(V,?K), hash:{resource}(K,count,?count), eq:{test}(K,K), key:K, ?res:V) use !db {
+    ?tab_len = cuckoo^length
     ?res = foreign lpvm cast(EMPTY)
 
-    for ?i_table in 0..N_TABLE {
+    for ?i_tab in 0..foreign lpvm cast(N_TABLE) {
         # Compute the hash index
-        !hash(key, ?h_key)
-        ?h_key_mod = h_key % foreign lpvm cast(t_length):count
-        if { i_table ~= 0 :: !h_key_mod *= BIG_PRIME }
-        ?h_idx = h_key_mod % foreign lpvm cast(t_length):count
+        !hash(key, cuckoo^rehash_count*2:count + foreign lpvm cast(i_tab), ?h_key)
+        ?idx = tab_len * foreign lpvm cast(i_tab) + h_key % tab_len
 
         # Check if the key is equal
-        ?t_idx = t_length*i_table + foreign lpvm cast(h_idx)
-        ?val = unsafe_get(cuckoo_table, t_idx)
-        if { foreign lpvm cast(val) = EMPTY :: next }
+        !get(cuckoo, idx, ?val)
+        unless foreign lpvm cast(val) = EMPTY
         !val2key(val, ?cand_key)
 
         if {
@@ -104,27 +207,24 @@ pub def {noinline} lookup(cuckoo_table:array(V), val2key:{resource}(V,?K), hash:
     }
 }
 
-pub def {noinline} pop(!cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{resource}(K,?count), eq:{test}(K,K), key:K, ?res:V) {
-    ?t_length = cuckoo_table^length / 2:int
+pub def {noinline} pop(!cuckoo:_(V), val2key:{resource}(V,?K), hash:{resource}(K,count,?count), eq:{test}(K,K), key:K, ?res:V) use !db {
+    ?tab_len = cuckoo^length
     ?res = foreign lpvm cast(EMPTY)
 
-    for ?i_table in 0..N_TABLE {
+    for ?i_tab in 0..foreign lpvm cast(N_TABLE) {
         # Compute the hash index
-        !hash(key, ?h_key)
-        ?h_key_mod = h_key % foreign lpvm cast(t_length):count
-        if { i_table ~= 0 :: !h_key_mod *= BIG_PRIME }
-        ?h_idx = h_key_mod % foreign lpvm cast(t_length):count
+        !hash(key, cuckoo^rehash_count*2:count + foreign lpvm cast(i_tab), ?h_key)
+        ?idx = tab_len * foreign lpvm cast(i_tab) + h_key % tab_len
 
         # Check if the key is equal
-        ?t_idx = t_length*i_table + foreign lpvm cast(h_idx)
-        ?val = unsafe_get(cuckoo_table, t_idx)
-        if { foreign lpvm cast(val) = EMPTY :: next }
+        !get(cuckoo, idx, ?val)
+        unless foreign lpvm cast(val) = EMPTY
         !val2key(val, ?cand_key)
 
         if {
             eq(cand_key, key) ::
                 ?res = val
-                unsafe_update(!cuckoo_table, t_idx, foreign lpvm cast(EMPTY))
+                !set(cuckoo, idx, foreign lpvm cast(EMPTY))
                 break
         |   else ::
                 ?res = res
@@ -132,46 +232,43 @@ pub def {noinline} pop(!cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{r
     }
 }
 
-pub def {noinline} delete(!cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{resource}(K,?count), eq:{test}(K,K), key:K) {
-    ?t_length = cuckoo_table^length / 2:int
+pub def {noinline} delete(!cuckoo:_(V), val2key:{resource}(V,?K), hash:{resource}(K,count,?count), eq:{test}(K,K), key:K) use !db {
+    ?tab_len = cuckoo^length
 
-    for ?i_table in 0..N_TABLE {
+    for ?i_tab in 0..foreign lpvm cast(N_TABLE) {
         # Compute the hash index
-        !hash(key, ?h_key)
-        ?h_key_mod = h_key % foreign lpvm cast(t_length):count
-        if { i_table ~= 0 :: !h_key_mod *= BIG_PRIME }
-        ?h_idx = h_key_mod % foreign lpvm cast(t_length):count
+        !hash(key, cuckoo^rehash_count*2:count + foreign lpvm cast(i_tab), ?h_key)
+        ?idx = tab_len * foreign lpvm cast(i_tab) + h_key % tab_len
 
         # Check if the key is equal
-        ?t_idx = t_length*i_table + foreign lpvm cast(h_idx)
-        ?val = unsafe_get(cuckoo_table, t_idx)
-        if { foreign lpvm cast(val) = EMPTY :: next }
+        !get(cuckoo, idx, ?val)
+        unless foreign lpvm cast(val) = EMPTY
         !val2key(val, ?cand_key)
         if {
             eq(cand_key, key) :: 
-                unsafe_update(!cuckoo_table, t_idx, foreign lpvm cast(EMPTY))
+                !set(cuckoo, idx, foreign lpvm cast(EMPTY))
                 break
         }
     }
 }
 
-pub def {noinline} entity_insert(!cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{resource}(K,?count), eq:{test}(K,K), ety:V, set_next:{resource}(V,V)) {
+pub def {noinline} entity_insert(!cuckoo:_(V), val2key:{resource}(V,?K), hash:{resource}(K,count,?count), eq:{test}(K,K), ety:V, set_next:{resource}(V,V)) use !db {
     !val2key(ety, ?key)
-    !pop(!cuckoo_table, val2key, hash, eq, key, ?res)
+    !pop(!cuckoo, val2key, hash, eq, key, ?res)
     !set_next(ety, res)
-    !insert(!cuckoo_table, val2key, hash, ety)
+    !insert(!cuckoo, val2key, hash, ety)
 }
 
-pub def {noinline} entity_delete(!cuckoo_table:array(V), val2key:{resource}(V,?K), hash:{resource}(K,?count), eq:{test}(K,K), ety:V, get_next:{resource}(V,?V), set_next:{resource}(V,V)) {
+pub def {noinline} entity_delete(!cuckoo:_(V), val2key:{resource}(V,?K), hash:{resource}(K,count,?count), eq:{test}(K,K), ety:V, get_next:{resource}(V,?V), set_next:{resource}(V,V)) use !db {
     !val2key(ety, ?key)
-    !lookup(cuckoo_table, val2key, hash, eq, key, ?res)
+    !lookup(cuckoo, val2key, hash, eq, key, ?res)
     if {
         foreign lpvm cast(res):count = foreign lpvm cast(ety):count ::
             !get_next(ety, ?nxt)
-            !delete(cuckoo_table, val2key, hash, eq, key)
+            !delete(!cuckoo, val2key, hash, eq, key)
             if {
                 foreign lpvm cast(nxt):count ~= 0:count ::
-                    !insert(cuckoo_table, val2key, hash, nxt)
+                    !insert(!cuckoo, val2key, hash, nxt)
             }
     |   else ::
             ?prv = res
@@ -186,19 +283,8 @@ pub def {noinline} entity_delete(!cuckoo_table:array(V), val2key:{resource}(V,?K
 }
 
 # XXX: Prettify the table
-pub def {noinline} print_table(cuckoo_table:array(V), val2key:{resource}(V,?K), printer:{resource}(K)) use !io {
-    !println("Cuckoo Table:")
-    ?len = cuckoo_table^length / 2
-    ?i = 0
-    for ?n in cuckoo_table {
-        !print(i % len)
-        !print(": ")
-        if {
-            foreign lpvm cast(n):count = 0:count :: !println("NULL")
-        |   else :: !val2key(n, ?key); !printer(key); !nl
-        }
-        !i += 1
-    }
+pub def {noinline} print_table(cuckoo:_(V), val2key:{resource}(V,?K), printer:{resource}(K)) use !io, !db {
+    !print_table(cuckoo^table, val2key, printer)
 }
 
 #|
@@ -234,14 +320,14 @@ def val2key(val:ll, ?key:int) use !db {
 ?n2:ll = node(4, ll_null)
 ?n3:ll = node(6, ll_null)
 
-?cuckoo_table = array(ll_null, INITIAL_TABLE_SIZE * N_TABLE)
+?cuckoo = cuckoo(array(ll_null, INITIAL_TABLE_SIZE * N_TABLE), 0)
 
-!entity_insert(!cuckoo_table, val2key, hash, `=`, n0, set_next)
-!entity_insert(!cuckoo_table, val2key, hash, `=`, n1, set_next)
-!entity_insert(!cuckoo_table, val2key, hash, `=`, n2, set_next)
-!entity_insert(!cuckoo_table, val2key, hash, `=`, n3, set_next)
+!entity_insert(!cuckoo, val2key, hash, `=`, n0, set_next)
+!entity_insert(!cuckoo, val2key, hash, `=`, n1, set_next)
+!entity_insert(!cuckoo, val2key, hash, `=`, n2, set_next)
+!entity_insert(!cuckoo, val2key, hash, `=`, n3, set_next)
 
-!print_table(cuckoo_table, get_val, print)
+!print_table(cuckoo, get_val, print)
 
 ?cur = n3
 do {
@@ -251,9 +337,9 @@ do {
     !get_next(cur, ?cur)
 }
 
-!entity_delete(!cuckoo_table, val2key, hash, `=`, n3, get_next, set_next)
+!entity_delete(!cuckoo, val2key, hash, `=`, n3, get_next, set_next)
 
-!print_table(cuckoo_table, get_val, print)
+!print_table(cuckoo, get_val, print)
 
 ?cur = n3
 do {
@@ -269,36 +355,36 @@ do {
 !set_random_seed(17)
 !generate_lookup_table
 
-?cuckoo_table = array(EMPTY, INITIAL_TABLE_SIZE * N_TABLE)
+?cuckoo = array(EMPTY, INITIAL_TABLE_SIZE * N_TABLE)
 ?g = {resource}{?@2 = foreign lpvm cast(@1:count)-1}
-!insert(!cuckoo_table, g, hash, 4:count)
-!print("cuckoo_table^length: "); !println(cuckoo_table^length)
-!insert(!cuckoo_table, g, hash, 2:count)
+!insert(!cuckoo, g, hash, 4:count)
+!print("cuckoo^table^length: "); !println(cuckoo^table^length)
+!insert(!cuckoo, g, hash, 2:count)
 
 !println("Cuckoo Table:")
-for ?t in cuckoo_table {
+for ?t in cuckoo^table {
    !println(t)
 }
 
 
-?cuckoo_table = array(EMPTY, INITIAL_TABLE_SIZE * N_TABLE)
+?cuckoo = array(EMPTY, INITIAL_TABLE_SIZE * N_TABLE)
 ?g = {resource}{?@2 = foreign lpvm cast(@1:count)-1}
-!insert(!cuckoo_table, g, hash, 4:count)
-!print("cuckoo_table^length: "); !println(cuckoo_table^length)
-!insert(!cuckoo_table, g, hash, 2:count)
+!insert(!cuckoo, g, hash, 4:count)
+!print("cuckoo^table^length: "); !println(cuckoo^table^length)
+!insert(!cuckoo, g, hash, 2:count)
 
 !println("Cuckoo Table:")
-for ?t in cuckoo_table {
+for ?t in cuckoo^table {
    !println(t)
 }
 
 
-!lookup(cuckoo_table, g, 4, ?res, ?found)
+!lookup(cuckoo, g, 4, ?res, ?found)
 #?found = true
 !print("found: "); !println(found)
 if { found :: !print("lookup(4): "); !println(res) }
 
-!lookup(cuckoo_table, g, 1, ?res, ?found)
+!lookup(cuckoo, g, 1, ?res, ?found)
 !print("found: "); !println(found)
 if { found :: !print("lookup(1): "); !println(res) }
 |#
