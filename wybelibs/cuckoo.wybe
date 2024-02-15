@@ -110,7 +110,7 @@ def resize_reset(!cuckoo:_(V)) {
 def get_vals(cuckoo:_(V), ?vals:array(V)) use !db {
     ?data = cuckoo^table^raw_data
     ?i = 0
-    ?vals = array(foreign lpvm cast(EMPTY), cuckoo^item_count)
+    ?vals = array(foreign lpvm cast(EMPTY):V, foreign lpvm cast(cuckoo^item_count))
     ?raw = vals^raw_data
     for ?idx in 0..foreign lpvm cast(N_TABLE*cuckoo^table^length) {
         !get(cuckoo, foreign lpvm cast(idx), ?val)
@@ -282,14 +282,29 @@ pub def {noinline} entity_delete(!cuckoo:_(V), val2key:{resource}(V,?K), hash:{r
     }
 }
 
-# XXX: Prettify the table
 pub def {noinline} print_table(cuckoo:_(V), val2key:{resource}(V,?K), printer:{resource}(K)) use !io, !db {
     !print_table(cuckoo^table, val2key, printer)
 }
 
 #|
-# Testing entity hashing
-use random, hash, db
+# General Hashing
+?cuck = cuckoo(1:count)
+?val2key = {resource}{?@2:int = foreign lpvm cast(@1:count)}
+!insert(!cuck, val2key, hash, 4:count)
+!insert(!cuck, val2key, hash, 2:count)
+!insert(!cuck, val2key, hash, 3:count)
+!print_table(cuck, val2key, print)
+
+!lookup(cuck, val2key, hash, `=`, 4, ?res)
+!println("lookup(4): $res")
+
+!lookup(cuck, val2key, hash, `=`, 2, ?res)
+!println("lookup(2): $res")
+
+!lookup(cuck, val2key, hash, `=`, 3, ?res)
+!println("lookup(3): $res")
+
+# Entity Hashing
 !set_random_seed(17)
 !generate_lookup_table
 
@@ -320,26 +335,19 @@ def val2key(val:ll, ?key:int) use !db {
 ?n2:ll = node(4, ll_null)
 ?n3:ll = node(6, ll_null)
 
-?cuckoo = cuckoo(array(ll_null, INITIAL_TABLE_SIZE * N_TABLE), 0)
+?cuck = cuckoo(17:count)
 
-!entity_insert(!cuckoo, val2key, hash, `=`, n0, set_next)
-!entity_insert(!cuckoo, val2key, hash, `=`, n1, set_next)
-!entity_insert(!cuckoo, val2key, hash, `=`, n2, set_next)
-!entity_insert(!cuckoo, val2key, hash, `=`, n3, set_next)
+!entity_insert(!cuck, val2key, hash, `=`, n0, set_next)
+!entity_insert(!cuck, val2key, hash, `=`, n1, set_next)
+!entity_insert(!cuck, val2key, hash, `=`, n2, set_next)
+!entity_insert(!cuck, val2key, hash, `=`, n3, set_next)
 
-!print_table(cuckoo, get_val, print)
+!print_table(cuck, get_val, print)
 
-?cur = n3
-do {
-    until foreign lpvm cast(cur):count = foreign lpvm cast(0):count
-    !get_val(cur, ?val)
-    !println(val)
-    !get_next(cur, ?cur)
-}
 
-!entity_delete(!cuckoo, val2key, hash, `=`, n3, get_next, set_next)
+!entity_delete(!cuck, val2key, hash, `=`, n2, get_next, set_next)
 
-!print_table(cuckoo, get_val, print)
+!print_table(cuck, get_val, print)
 
 ?cur = n3
 do {
@@ -348,43 +356,4 @@ do {
     !println(val)
     !get_next(cur, ?cur)
 }
-|#
-
-#|
-# Testing general hashing
-!set_random_seed(17)
-!generate_lookup_table
-
-?cuckoo = array(EMPTY, INITIAL_TABLE_SIZE * N_TABLE)
-?g = {resource}{?@2 = foreign lpvm cast(@1:count)-1}
-!insert(!cuckoo, g, hash, 4:count)
-!print("cuckoo^table^length: "); !println(cuckoo^table^length)
-!insert(!cuckoo, g, hash, 2:count)
-
-!println("Cuckoo Table:")
-for ?t in cuckoo^table {
-   !println(t)
-}
-
-
-?cuckoo = array(EMPTY, INITIAL_TABLE_SIZE * N_TABLE)
-?g = {resource}{?@2 = foreign lpvm cast(@1:count)-1}
-!insert(!cuckoo, g, hash, 4:count)
-!print("cuckoo^table^length: "); !println(cuckoo^table^length)
-!insert(!cuckoo, g, hash, 2:count)
-
-!println("Cuckoo Table:")
-for ?t in cuckoo^table {
-   !println(t)
-}
-
-
-!lookup(cuckoo, g, 4, ?res, ?found)
-#?found = true
-!print("found: "); !println(found)
-if { found :: !print("lookup(4): "); !println(res) }
-
-!lookup(cuckoo, g, 1, ?res, ?found)
-!print("found: "); !println(found)
-if { found :: !print("lookup(1): "); !println(res) }
 |#
