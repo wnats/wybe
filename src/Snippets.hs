@@ -17,7 +17,7 @@ module Snippets (castFromTo, castTo, withType, intType, intCast,
                  globalStore, globalLoad,
                  primMove, primAccess, primCast,
                  boolNegate, comparison, succeedTest, failTest, testVar, succeedIfSemiDet,
-                 cmdLineModSpec, countType, arrayType, listType) where
+                 cmdLineModSpec, countType, arrayType, listType, cuckooType) where
 
 import Config
 import AST
@@ -259,3 +259,7 @@ arrayType = TypeSpec ["wybe"] "array" . (:[])
 -- | The list type
 listType :: TypeSpec -> TypeSpec
 listType = TypeSpec ["wybe"] "list" . (:[])
+
+-- | The cuckoo type
+cuckooType :: TypeSpec -> TypeSpec
+cuckooType = TypeSpec [] "cuckoo" . (:[])

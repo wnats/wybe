@@ -135,15 +135,13 @@ normaliseItem (EntityDecl vis placedEntityProto entityMods pos) = do
             pos
     
     -- Prepare the cuckoo tables
-    let cuckooTableType = arrayType etyType
+    let cuckooEtyType = cuckooType etyType
         cuckooTableCount = 2
         -- initCuckooTableSize = 163 * cuckooTableCount
         initCuckooTable =
             Unplaced
-            $ Fncall ["wybe", "array"] "array" False
-                [nullEntity,
-                 Unplaced $ Fncall ["cuckoo"] "INITIAL_TABLE_SIZE" False []
-                ]
+            $ Fncall ["cuckoo"] "cuckoo" False
+                [Unplaced $ Fncall ["cuckoo"] "INITIAL_TABLE_SIZE" False []]
 
     -- Handle key and index resources
     let keyMods = List.filter ((==Key). entityModifierType) entityMods
@@ -157,7 +155,7 @@ normaliseItem (EntityDecl vis placedEntityProto entityMods pos) = do
         (\keyResName -> do
             addSimpleResource
                 keyResName
-                (SimpleResource cuckooTableType (Just initCuckooTable) pos)
+                (SimpleResource cuckooEtyType (Just initCuckooTable) pos)
                 Public
             normaliseItem
                 $ StmtDecl
@@ -1291,11 +1289,11 @@ entityItems typeSpec info@(CtorInfo entityName paramInfos vis pos 0 bits) modDic
 
     let params = paramInfoParam <$> paramInfos
         keyNames = [names | KeyModifierInfo names <- modInfos]
-        cuckooType = arrayType typeSpec
+        cuckooEtyType = cuckooType typeSpec
 
         getLastEtyResItem = entityGetResourceItem vis typeSpec pos $ lastEntityResourceSpec entityName
-        getKeyResItems = entityGetResourceItem vis cuckooType pos . keyFieldResourceSpec entityName <$> keyNames
-        getIndexResItems = entityGetResourceItem vis cuckooType pos . indexFieldResourceSpec entityName <$> indexNames
+        getKeyResItems = entityGetResourceItem vis cuckooEtyType pos . keyFieldResourceSpec entityName <$> keyNames
+        getIndexResItems = entityGetResourceItem vis cuckooEtyType pos . indexFieldResourceSpec entityName <$> indexNames
 
         createItem = entityCreateItem vis entityName typeSpec params fields size pos keyNames
 
