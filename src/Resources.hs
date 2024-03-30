@@ -83,16 +83,41 @@ checkResourceDef name def = do
         unzip3 <$> mapM (uncurry checkResourceImpln) (Map.toList def)
     return (or chg, concat errs, (name,Map.fromList m))
 
--- |Check a resource implmentation
+-- |Check a resource implementation
 checkResourceImpln :: ResourceSpec -> ResourceImpln
                  -> Compiler (Bool,[(String,OptPos)],
                               (ResourceSpec,ResourceImpln))
-checkResourceImpln rspec impln@(SimpleResource ty init pos) = do
+checkResourceImpln rspec impln@(SimpleResource ty mbPInit pos) = do
     logResources $ "Check resource " ++ show rspec
                  ++ " with implementation " ++ show impln
     ty' <- lookupType "resource declaration" pos ty
     logResources $ "Actual type is " ++ show ty'
-    return (ty' /= ty,[],(rspec,SimpleResource ty' init pos))
+
+    (initChg, mbPInit') <-
+        if maybe False (isTyped . content) mbPInit
+        then do
+            let pInit = trustFromJust "checkResourceImpln" mbPInit
+            let initTy = typedTy $ content pInit
+            let pInitExp = contentApply typedExp pInit
+            initTy' <- lookupType "resource initialisation" pos initTy
+            return (initTy /= initTy',
+                    Just $ contentApply (`withType` initTy') pInitExp)
+        else do
+            return (False, mbPInit)
+    logResources $ "Actual initialisation is " ++ show mbPInit'
+
+    return (ty' /= ty || initChg, [],
+            (rspec,SimpleResource ty' mbPInit' pos))
+    where
+        isTyped Typed{} = True
+        isTyped _ = False
+
+        typedTy (Typed _ t _) = t
+        typedTy _ = shouldnt "typedTy on a non-Typed exp"
+
+        typedExp (Typed e _ _) = e
+        typedExp _ = shouldnt "typedExp on a non-Typed exp"
+
 -- checkOneResource rspec Nothing = do
 --     -- XXX don't currently handle compound resources
 --     nyi "compound resources"
@@ -123,7 +148,7 @@ canonicaliseProcResources pd _ = do
 canonicaliseResourceFlow :: OptPos -> ProcName -> ResourceFlowSpec
                          -> Compiler ResourceFlowSpec
 canonicaliseResourceFlow pos name spec = do
-    resTy <- canonicaliseResourceSpec pos 
+    resTy <- canonicaliseResourceSpec pos
                 ("declaration of " ++ showProcName name)
                 $ resourceFlowRes spec
     return $ spec { resourceFlowRes = fst resTy }
@@ -133,23 +158,22 @@ canonicaliseResourceFlow pos name spec = do
 
 -- | Data type to store the necessary data for adding resources to a proc
 data ResourceState = ResourceState {
+    -- | The set of resources and their types that are currently in scope
     resResources      :: Map ResourceSpec TypeSpec,
-    -- ^ The set of resources and their types that are currently in scope
+    -- | Tmp variables for resources that have been generated so far
     resTmpVars        :: VarDict,
-    -- ^ Tmp variables that have been generated so far
+    -- | The current tmp variable counter
     resTmpCtr         :: Int,
-    -- ^ The current tmp variable counter
+    -- | The set of resources that flow into the current stmt
     resIn             :: Map ResourceSpec TypeSpec,
-    -- ^ The set of resources that flow into the current stmt
+    -- | The set of resources that flow out of the current stmt
     resOut            :: Map ResourceSpec TypeSpec,
-    -- ^ The set of resources that flow out of the current stmt
+    -- | The set of resources that have been mentioned anywhere in this proc
     resMentioned      :: Map ResourceSpec TypeSpec,
-    -- ^ The set of resources that have been mentioned anywhere
-    -- in this procedure
+    -- | The tmp vars that are used to restore resources when breaking a loop
     resLoopTmps       :: Map ResourceSpec (VarName, TypeSpec),
-    -- ^ The tmp vars that are used to restore resources when breaking a loop
+    -- | Are we currently transforming the executable main procedure?
     resIsExecMain     :: Bool
-    -- ^ Are we currently transforming the executable main procedure
 }
 
 -- | Initial ResourceState given a tmpCtr
@@ -252,11 +276,17 @@ transformProc pos name variant detism params ress body = do
               else do
                 (saves, restores, tmpVars, _) <- saveRestoreResourcesTmp pos
                                             $ Map.toList newMentioned
+                -- re-transform the body so we have the right tmp variables
+                -- accounting for the resources we need to save and restore
+                body''' <- fst <$> transformStmts
+                     [UseResources ress' (Just Map.empty) body `maybePlace` pos]
+                -- XXX (Just tmpVars) is wrong here:  it should include ALL
+                -- variables assigned by body', but we don't have that
                 return $ saves
-                      ++ [Unplaced $ Cond (seqToStmt body')
+                      ++ [Unplaced $ Cond (seqToStmt body''')
                             []
                             (restores ++ [Unplaced Fail])
-                            (Just tmpVars) (Just tmpVars) (Just Set.empty)]
+                            (Just tmpVars) (Just Map.empty) (Just Set.empty)]
     modify $ \s -> s{resResources=oldResources,
                      resTmpVars=oldTmpVars,
                      resLoopTmps=oldLoopTmps,
@@ -265,11 +295,12 @@ transformProc pos name variant detism params ress body = do
     tmp <- gets resTmpCtr
     -- executable main gets special treatment
     -- in-flowing resources must be stored, and parameters are unmodified
-    return $ if isExecMain
-    then let inRes = List.filter (flowsIn . resourceFlowFlow . fst) resFlows
-             stores = storeResource pos . mapFst resourceFlowRes <$> inRes
-         in (allParams, stores ++ body'', tmp)
-    else (realParams, body'', tmp)
+    return $
+        if isExecMain
+        then let inRes = List.filter (flowsIn . resourceFlowFlow . fst) resFlows
+                 stores = storeResource pos . mapFst resourceFlowRes <$> inRes
+             in (allParams, stores ++ body'', tmp)
+        else (realParams, body'', tmp)
 
 
 -- Transform a list of Stmts, tranforming resources into globals
@@ -300,7 +331,7 @@ transformStmt stmt@(ProcCall fn@(First m n mbId) d resourceful args) pos = do
         $ lift $ errmsg pos
                $ "Call to resourceful proc without ! resource marker: "
                     ++ showStmt 4 stmt
-    resArgs <- concat <$> mapM (resourceArgs pos) 
+    resArgs <- concat <$> mapM (resourceArgs pos)
         (List.filter (isSpecialResource . resourceFlowRes) callResFlows)
     return (loadStoreResources pos ins outs
                 [ProcCall fn d False (args'' ++ resArgs) `maybePlace` pos],
@@ -319,13 +350,21 @@ transformStmt (ForeignCall lang name flags args) pos = do
                 [ForeignCall lang name flags args' `maybePlace` pos],
             not $ Map.null outs)
 transformStmt (Cond tst thn els condVars exitVars _) pos = do
+    oldResTmpVars <- gets resTmpVars
     (tst', tstGlobals) <- placedApply transformStmt tst
-    (thn', thnGlobals) <- transformStmts thn
-    (els', elsGlobals) <- transformStmts els
     (saves, restores) <- loadStoreResourcesIf pos tstGlobals
     condVars' <- fixVarDict condVars
     exitVars' <- fixVarDict exitVars
+    logResourcer $ "Transforming conditional:"
+    logResourcer $ "resTmpVars = " ++ showVarMap oldResTmpVars
+    logResourcer $ "     saves = " ++ showBody 13 saves
+    logResourcer $ "  restores = " ++ showBody 13 restores
+    logResourcer $ "  condVars = " ++ showVarMap (fromJust condVars')
+    logResourcer $ "  exitVars = " ++ showVarMap (fromJust exitVars')
+    (thn', thnGlobals) <- transformStmts thn
+    (els', elsGlobals) <- transformStmts els
     res <- gets resResources
+    modify $ \s -> s { resTmpVars = oldResTmpVars }
     return (saves ++ [Cond (seqToStmt tst') thn' (restores ++ els')
                             condVars' exitVars' (Just $ Map.keysSet res)
                         `maybePlace` pos],
@@ -333,18 +372,8 @@ transformStmt (Cond tst thn els condVars exitVars _) pos = do
 transformStmt (And stmts) pos = do
     (stmts', globals) <- transformStmts stmts
     return ([And stmts' `maybePlace` pos], globals)
-transformStmt (Or disjs vars _) pos = do
-    (disjs', globals) <- unzip <$> mapM (placedApply transformStmt) disjs
-    -- we only need to save resources, and restore before each disj if
-    -- any of the init use globals
-    -- the last's restoration is handled implicity
-    (saves, restores) <- loadStoreResourcesIf pos $ or $ init globals
-    let disjs'' = seqToStmt (head disjs')
-                : (seqToStmt . (restores ++) <$> tail disjs')
-    vars' <- fixVarDict vars
-    res <- gets resResources
-    return (saves ++ [Or disjs'' vars' (Just $ Map.keysSet res) `maybePlace` pos],
-            or globals)
+transformStmt (Or disjs vars _) pos =
+    shouldnt "Disjunction should have been flattened into conditional."
 transformStmt (Not stmt) pos = do
     ([stmt'], globals) <- transformStmts [stmt]
     return ([Not stmt' `maybePlace` pos], globals)
@@ -373,16 +402,16 @@ transformStmt (UseResources res vars stmts) pos = do
                   resLoopTmps=loopTmps,
                   resIsExecMain=isExecMain} <- get
     -- save/restore local variables that have been selected to be
-    (saves, restores, localTmpVars) <- saveRestoreLocalsTmp pos 
+    (saves, restores, localTmpVars) <- saveRestoreLocalsTmp pos
                                     $ Map.toList vars'
     (loads, stores, newVars, newLoopTmps) <- saveRestoreResourcesTmp pos resTypes
     let resources' = Map.fromList resTypes
     modify $ \s -> s {resResources=resources `Map.union` resources',
                       resMentioned=mentioned `Map.union` resources',
                       resLoopTmps=loopTmps `Map.union` newLoopTmps}
-    let tmpVars' = tmpVars `Map.union` localTmpVars
-    unless isExecMain $ 
-        modify $ \s -> s {resTmpVars=tmpVars' `Map.union` newVars}
+    unless isExecMain $
+        modify $ \s -> s {resTmpVars=resTmpVars s `Map.union` localTmpVars
+                                     `Map.union` newVars}
     -- saves/restores may manipulate globals
     stmts' <- fst <$> transformStmts (saves ++ stmts ++ restores)
     modify $ \s -> s {resResources=resources,
@@ -458,7 +487,7 @@ transformExp _ (Closure pspec exps) pos = do
     return $ Closure pspec exps' `maybePlace` pos
 transformExp _ (AnonProc mods@(ProcModifiers detism _ _ _ resful)
                 params body clsd _) pos = do
-    res <- List.map (`ResourceFlowSpec` ParamInOut) 
+    res <- List.map (`ResourceFlowSpec` ParamInOut)
          . List.filter (not . isSpecialResource)
          . Map.keys
         <$> gets resResources
@@ -604,7 +633,7 @@ resourceVar (ResourceSpec mod name) =
     -- XXX This could cause collisions!
     name
 
-    
+
 -- | Transform a ResourceFlowSpec with a type into a Param
 resourceParams :: (ResourceFlowSpec,TypeSpec) -> Placed Param
 resourceParams (ResourceFlowSpec res flow, typ) =
@@ -623,7 +652,7 @@ eitherResource res a =
 -- | Given a Param, return either the (ResourceFlowSpec, TypeSpec) associated
 -- with the parameter or the param itself
 eitherResourceParam :: Placed Param -> Either (ResourceFlowSpec, TypeSpec) (Placed Param)
-eitherResourceParam param = 
+eitherResourceParam param =
     case content param of
         Param _ ty fl (Resource res) ->
             mapLeft ((,ty) . (`ResourceFlowSpec` fl))
@@ -648,7 +677,7 @@ fixVarDict (Just vars) = do
     ress <- resourceNameMap <$> gets resResources
     tmpVars <- gets resTmpVars
     let filter res _ = not $ res `Map.member` ress
-    Just <$> return (Map.filterWithKey filter vars `Map.union` tmpVars)
+    return $ Just $ Map.filterWithKey filter vars `Map.union` tmpVars
 
 
 -- | Get a var as a resource of the given type
@@ -661,7 +690,8 @@ setResource :: Ident -> (ResourceSpec, TypeSpec) -> Exp
 setResource nm (rs, ty) = varSetTyped nm ty `setExpFlowType` Resource rs
 
 
--- | Save and restore the given resources in tmp variables
+-- | Generate code to save and restore the given resources in tmp variables.
+-- Also save the tmp variables in the Resourcer resTmpVars state.
 saveRestoreResourcesTmp :: OptPos -> [(ResourceSpec, TypeSpec)]
                         -> Resourcer ([Placed Stmt], [Placed Stmt], VarDict,
                                       Map ResourceSpec (VarName, TypeSpec))
@@ -671,12 +701,10 @@ saveRestoreResourcesTmp pos resTys = do
     let tmpVars = mkTempName <$> [tmp..]
         (res, tys) = unzip resTys
         ress = zip tmpVars resTys
-        localSave (t,(rs,ty)) = move (getResource (resourceVar rs) (rs,ty))
-                                     (setResource t (rs,ty))
-        localRestore (t,(rs,ty)) = move (getResource t (rs,ty))
-                                        (setResource (resourceVar rs) (rs,ty))
         globalSave (t,(rs,ty)) = globalLoad rs ty $ setResource t (rs,ty)
         globalRestore (t,(rs,ty)) = globalStore rs ty $ getResource t (rs,ty)
+    modify $ \s -> s{resTmpVars = List.foldr (\(k,v) m -> Map.insert k v m)
+                                        (resTmpVars s) $ zip tmpVars tys}
     return (rePlace pos . globalSave <$> ress, rePlace pos . globalRestore <$> ress,
             Map.fromList $ zip tmpVars (snd <$> resTys),
             Map.fromList $ zip res $ zip tmpVars tys)
@@ -730,7 +758,8 @@ loadStoreResources pos inRes outRes stmts =
 
 -- | Surround a given list of statements with loads/stores to the given
 -- resources, iff the flag is True
-loadStoreResourcesIf :: OptPos -> Bool -> Resourcer ([Placed Stmt],[Placed Stmt])
+loadStoreResourcesIf :: OptPos -> Bool
+                     -> Resourcer ([Placed Stmt],[Placed Stmt])
 loadStoreResourcesIf pos False = return ([], [])
 loadStoreResourcesIf pos True = do
     res <- gets resResources
