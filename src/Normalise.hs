@@ -137,11 +137,7 @@ normaliseItem (EntityDecl vis placedEntityProto entityMods pos) = do
     -- Prepare the cuckoo tables
     let cuckooEtyType = cuckooType etyType
         cuckooTableCount = 2
-        -- initCuckooTableSize = 163 * cuckooTableCount
-        initCuckooTable =
-            Unplaced
-            $ Fncall ["cuckoo"] "cuckoo" False
-                [Unplaced $ Fncall ["cuckoo"] "INITIAL_TABLE_SIZE" False []]
+        initCuckooTable = Unplaced $ Fncall ["cuckoo"] "cuckoo" False []
 
     -- Handle key and index resources
     let keyMods = List.filter ((==Key). entityModifierType) entityMods

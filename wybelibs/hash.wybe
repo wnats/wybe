@@ -1,25 +1,10 @@
-#|
-Python equivalent:
-def gen_T():
-    T = []
-    for i in range(8):
-        T.append([])
-        for j in range(256):
-            T[i].append(random.randint(0, 2**64-1))
-    return T
-
-def hash(T: list, x: int, size: int):
-    res = 0
-    for i in range(size):
-        res ^= T[256*i + (x & 255)]
-        x >>= 8
-    return res
-|#
-
-use random
+pub use random
 
 pub resource tab_hash:array(count) = uninitialised_array(1)
 
+# Generate the lookup table used for tabulation hashing
+# Sets the lookup table on tab_hash
+# The values depend on the RNG state random
 pub def generate_lookup_table use !random, ?tab_hash {
     ?n_chunks = 8
     ?poss_vals = 256
@@ -31,6 +16,12 @@ pub def generate_lookup_table use !random, ?tab_hash {
     }
 }
 
+# Hash a count
+pub def hash(x:count, ?h_x:count) use tab_hash {
+    !hash(x, 0:count, ?h_x)
+}
+
+# Hash a count with a bias/salt
 pub def hash(x:count, bias:count, ?h_x:count) use tab_hash {
     ?h_x = 0:count
     ?table_size = tab_hash^length
@@ -43,8 +34,13 @@ pub def hash(x:count, bias:count, ?h_x:count) use tab_hash {
     }
 }
 
-pub def hash(x:int, bias:count, ?h_x:count) use tab_hash {
+# Hash an int
+pub def hash(x:count, ?h_x:count) use tab_hash {
+    !hash(x, 0:count, ?h_x)
+}
 
+# Hash an int with a bias/salt
+pub def hash(x:int, bias:count, ?h_x:count) use tab_hash {
     ?h_x = 0:count
     ?table_size = tab_hash^length
     for ?i in 0..8 {
@@ -54,10 +50,14 @@ pub def hash(x:int, bias:count, ?h_x:count) use tab_hash {
         ?h_x = xor(h_x, unsafe_get(tab_hash, idx % table_size))
         ?x = logical_bitshift(x, 8)
     }
-
-    # ?h_x = foreign lpvm cast(x)
 }
 
+# Hash a string
+pub def hash(x:string, ?h_x:count) use tab_hash {
+    !hash(x, 0:count, ?h_x)
+}
+
+# Hash a string with a bias/salt
 pub def hash(x:string, bias:count, ?h_x: count) use tab_hash {
     ?h_x = 0:count
     ?table_size = tab_hash^length
@@ -67,37 +67,5 @@ pub def hash(x:string, bias:count, ?h_x: count) use tab_hash {
     }
 }
 
-#| Set the RNG seed
-if { foreign c atoi(arguments[0]) = ?RAND_SEED :: succeed
-   | else :: ?RAND_SEED = 17:int
-}
-|#
-
-#!set_random_seed(foreign c time(0))
+!set_random_seed(foreign c time(0))
 !generate_lookup_table
-
-#| Testing counts
-for ?i in 0..10 {
-    #!random(?n:count)
-    foreign lpvm cast(i, ?n:count)
-    !print("n: "); !println(n)
-    !hash(n, ?h_n)
-    !print("h_n (% 50): "); !println(h_n % 50:count)
-}
-|#
-
-#| Testing ints
-for ?i in 0..10 {
-    !print("i: "); !println(i)
-    !hash(i, ?h_i)
-    !print("h_i (% 50): "); !println(h_i % 50:count)
-}
-|#
-
-#| Testing hash strings
-for ?str in ["Steven", "Stanley", "Sutanrii"] {
-    !print("str: "); !println(str)
-    !hash(str, ?h_str)
-    !print("h_str (% 50): "); !println(h_str % 50:count)
-}
-|#
