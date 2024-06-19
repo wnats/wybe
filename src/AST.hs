@@ -930,44 +930,69 @@ addConstructor vis pctor = do
     updateModule (\m -> m { modIsType  = True })
     addKnownType currMod
 
+-- | Add the specified entity and its required libraries to the current module.
+-- Makes the module a type. Also verifies the following:
+--   1. Module has no type representation
+--   2. Module has no constructor
 addEntity :: Visibility -> Placed ProcProto -> [EntityModifier] -> Compiler ()
 addEntity vis placedEntityProto entityModifiers = do
     let pos = place placedEntityProto
-        entityProto = content placedEntityProto
     currMod <- getModuleSpec
+
     hasRepn <- isJust <$> getModule modTypeRep
     when hasRepn
       $ errmsg pos
            $ "Declaring entity for type " ++ showModSpec currMod
            ++ " with declared representation"
+
     ctors <- fromMaybe [] <$> getModuleImplementationField modConstructors
     unless (List.null ctors)
       $  errmsg pos
            $ "Declaring entity for type " ++ showModSpec currMod
            ++ " with declared constructor(s)"
-    updateImplementation (\m -> m { modEntity = Just (vis, placedEntityProto) })
-    updateImplementation (\m -> m { modEntityModDict = Just
-                            $ buildEntityModifierDict entityModifiers })
-    updateModule (\m -> m { modIsType = True })
 
-    -- Import prerequisite libraries
     let defaultImports = [dbModSpec]
         cuckooImports = [hashModSpec, cuckooModSpec]
         imports = if List.null entityModifiers then defaultImports
                   else defaultImports ++ cuckooImports
     mapM_ (flip addImport $ importSpec Nothing Public) imports
 
+    updateImplementation (\m -> m { modEntity = Just (vis, placedEntityProto) })
+    updateImplementation (\m -> m { modEntityModDict = Just
+                            $ buildEntityModifierDict entityModifiers })
+    updateModule (\m -> m { modIsType = True })
+
     addKnownType currMod
 
+-- | Add the specified relation to the current module.
+-- Makes the module a type. Also verifies the following:
+--   1. Module has no type representation
+--   2. Module has no constructor
+--   3. Module has only one relation declaration
+--   4. Relation is binary (for now)
 addRelation :: Visibility -> Placed ProcProto -> Compiler ()
 addRelation vis relationProto = do
+    let pos = place relationProto
+        relDeclParams = procProtoParams $ content relationProto
+        etyTypes = paramType . content <$> relDeclParams
+
+    currMod <- getModuleSpec
     mbRelEty <- getModuleImplementationField modRelationEntities
+
+    hasRepn <- isJust <$> getModule modTypeRep
+    when hasRepn
+      $ errmsg pos
+           $ "Declaring relation for type " ++ showModSpec currMod
+           ++ " with declared representation"
+
+    ctors <- fromMaybe [] <$> getModuleImplementationField modConstructors
+    unless (List.null ctors)
+      $  errmsg pos
+           $ "Declaring relation for type " ++ showModSpec currMod
+           ++ " with declared constructor(s)"
 
     unless (isNothing mbRelEty)
         $ errmsg (place relationProto) "Multiple relation declarations"
-
-    let relDeclParams = procProtoParams $ content relationProto
-        etyTypes = paramType . content <$> relDeclParams
 
     unless (length etyTypes == 2)
         $ nyi "Non-binary relations"
@@ -976,10 +1001,10 @@ addRelation vis relationProto = do
         name = procProtoName $ content relationProto
 
     updateImplementation (\s -> s{ modRelationName = Just name })
-    updateImplementation (\s -> s{ modRelationEntities = Just (etyType0, etyType1)})
-
+    updateImplementation (\s ->
+                            s{ modRelationEntities = Just (etyType0, etyType1)})
     updateModule (\m -> m { modIsType = True })
-    currMod <- getModuleSpec
+
     addKnownType currMod
 
 -- |Record that the specified type is known in the current module.
@@ -1656,7 +1681,10 @@ data ModuleImplementation = ModuleImplementation {
 
     modEntity :: Maybe (Visibility, Placed ProcProto), -- ^Entity constructor
     modEntityModDict :: Maybe EntityModifierDict, -- ^Mapping between attributes
-                                                -- and their modifiers
+                                                  -- and their modifiers. Used
+                                                  -- to check whether a set of
+                                                  -- attribute(s) form a
+                                                  -- key/index/etc
     modEntityResources :: Maybe (Set ResourceSpec), -- ^Resources used by entity
     modEntityRelations :: Maybe [ModSpec], -- ^Relations related to this entity
 

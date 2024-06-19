@@ -17,7 +17,9 @@ module Snippets (castFromTo, castTo, withType, intType, intCast,
                  globalStore, globalLoad,
                  primMove, primAccess, primCast,
                  boolNegate, comparison, succeedTest, failTest, testVar, succeedIfSemiDet,
-                 cmdLineModSpec, countType, arrayType, listType, cuckooType) where
+                 cmdLineModSpec, countType, arrayType, listType, cuckooType,
+                 currModType, nullVal, identicalWith, nonIdenticalWith,
+                 emptyCuckooTable) where
 
 import Config
 import AST
@@ -263,3 +265,33 @@ listType = TypeSpec ["wybe"] "list" . (:[])
 -- | The cuckoo type
 cuckooType :: TypeSpec -> TypeSpec
 cuckooType = TypeSpec [] "cuckoo" . (:[])
+
+-- | This module's type
+currModType :: TypeSpec
+currModType = TypeSpec [] currentModuleAlias []
+
+-- | A null value (e.g. null entity)
+nullVal :: Exp
+nullVal = ForeignFn "lpvm" "cast" [] [Unplaced $ iVal 0]
+
+-- | Do the two expressions have the same 64-bit unsigned value?
+identicalWith :: Placed Exp -> Placed Exp -> Placed Stmt
+identicalWith exp0 exp1 =
+    Unplaced $ ProcCall (regularProc "=") SemiDet False
+        [castToCount exp0, castToCount exp1]
+
+-- | Do the two expressions have different 64-bit unsigned values?
+nonIdenticalWith :: Placed Exp -> Placed Exp -> Placed Stmt
+nonIdenticalWith exp0 exp1 =
+    Unplaced $ ProcCall (regularProc "~=") SemiDet False
+        [castToCount exp0, castToCount exp1]
+
+-- | Cast an expression to a 64-bit unsigned value
+castToCount :: Placed Exp -> Placed Exp
+castToCount exp =
+    Unplaced $ ForeignFn "lpvm" "cast" [] [exp] `withType` countType
+
+-- | Initialise an empty cuckoo table with the default size
+--   See cuckoo.cuckoo function in wybelibs/cuckoo.wybe
+emptyCuckooTable :: Exp
+emptyCuckooTable = Fncall ["cuckoo"] "cuckoo" False []

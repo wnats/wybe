@@ -495,10 +495,7 @@ flattenLookup etyModSpec etyProto args pos = do
         etyTmp = entityVariableName
 
         -- foreign lpvm cast(#ety):count ~= 0:count
-    let breakTest = Unplaced
-                    $ ProcCall (regularProc "~=") SemiDet False
-                        [Unplaced $ ForeignFn "lpvm" "cast" [] [Unplaced $ varGet etyTmp] `withType` countType,
-                         Unplaced $ iVal 0 `withType` countType]
+    let breakTest = (nonIdenticalWith `on` Unplaced) (varGet etyTmp) (iVal 0)
 
         -- foreign llvm move(#ety, ?<ety>)
         movTmpEty = move (varGet etyTmp) $ varSet etyVar
@@ -550,7 +547,7 @@ lookupStrategy etyModSpec attrs pAttrArgs pos = do
     let inAttrArgs = List.filter (Set.null . expOutputs . content . snd) $ zip attrs pAttrArgs
         mbKeyAttrArg = List.find (liftM2 any isKey (\k -> Map.findWithDefault [] k modDict) . fst) inAttrArgs
         mbIndexAttrArg = List.find (liftM2 any isIndex (\k -> Map.findWithDefault [] k modDict) . fst) inAttrArgs
-        nullEty = ForeignFn "lpvm" "cast" [] [Unplaced $ iVal 0]
+        nullEty = nullVal
         etyTmp = entityVariableName
     noteVarIntro etyTmp
     -- Lookout for key

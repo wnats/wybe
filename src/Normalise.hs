@@ -118,49 +118,9 @@ normaliseItem item@ProcDecl{} = do
 normaliseItem (EntityDecl vis placedEntityProto entityMods pos) = do
     addEntity vis placedEntityProto entityMods
 
-    -- Handle next resource
-    let etyType = TypeSpec [] currentModuleAlias []
-        nullEntity = Unplaced
-                        $ ForeignFn "lpvm" "cast" [] [Unplaced $ iVal 0]
-                            `withType` etyType
-        etyName = procProtoName $ content placedEntityProto
-    addSimpleResource
-        (lastEntityResourceName etyName)
-        (SimpleResource etyType (Just nullEntity) pos)
-        Public
-    normaliseItem
-        $ StmtDecl
-            (ForeignCall "llvm" "move" []
-                [nullEntity, varSet (lastEntityResourceName etyName) `maybePlace` pos])
-            pos
-    
-    -- Prepare the cuckoo tables
-    let cuckooEtyType = cuckooType etyType
-        cuckooTableCount = 2
-        initCuckooTable = Unplaced $ Fncall ["cuckoo"] "cuckoo" False []
-
-    -- Handle key and index resources
-    let keyMods = List.filter ((==Key). entityModifierType) entityMods
-        keyResNames = keyResourceName etyName . mergeAttrNames . entityModifierAttr
-                        <$> keyMods
-        indexMods = List.filter ((==Index). entityModifierType) entityMods
-        indexResNames = indexResourceName etyName . mergeAttrNames . entityModifierAttr
-                            <$> indexMods
-
-    mapM_
-        (\keyResName -> do
-            addSimpleResource
-                keyResName
-                (SimpleResource cuckooEtyType (Just initCuckooTable) pos)
-                Public
-            normaliseItem
-                $ StmtDecl
-                    (ForeignCall "llvm" "move" []
-                        [initCuckooTable,
-                         varSet keyResName `maybePlace` pos])
-                    pos
-        )
-        (keyResNames ++ indexResNames)
+    let etyName = procProtoName $ content placedEntityProto
+    normaliseLastEntityResource etyName pos
+    normaliseCuckooResources etyName entityMods pos
 normaliseItem (RelationDecl vis relationProto _) = do
     addRelation vis relationProto
 normaliseItem (StmtDecl stmt pos) = do
@@ -203,7 +163,41 @@ normaliseSubmodule name vis pos items = do
     logNormalise $ "Finished normalising submodule " ++ showModSpec subModSpec
     return ()
 
+-- | Add a resource storing the last created entity
+normaliseLastEntityResource :: ProcName -> OptPos -> Compiler ()
+normaliseLastEntityResource etyName pos = do
+    let nullEty = Unplaced $ nullVal `withType` currModType
+    addSimpleResource
+        (lastEntityResourceName etyName)
+        (SimpleResource currModType (Just nullEty) pos)
+        Public
 
+-- | Normalise a cuckoo table resource for each key/index attributes
+normaliseCuckooResources :: ProcName -> [EntityModifier] -> OptPos
+                         -> Compiler ()
+normaliseCuckooResources etyName entityMods pos = do
+    let cuckooEtyType = cuckooType currModType
+        cuckooTable = Unplaced $ emptyCuckooTable `withType` cuckooEtyType
+        
+        keyMods = List.filter ((==Key) . entityModifierType) entityMods
+        keyResNames = keyResourceName etyName
+                        . mergeAttrNames
+                        . entityModifierAttr
+                        <$> keyMods
+        indexMods = List.filter ((==Index) . entityModifierType) entityMods
+        indexResNames = indexResourceName etyName
+                            . mergeAttrNames
+                            . entityModifierAttr
+                            <$> indexMods
+
+    mapM_
+        (\resName ->
+            addSimpleResource
+                resName
+                (SimpleResource cuckooEtyType (Just cuckooTable) pos)
+                Public
+        )
+        (keyResNames ++ indexResNames)
 
 ----------------------------------------------------------------
 --                         Completing Normalisation
@@ -301,38 +295,78 @@ modTypeDeps modSet = do
     tyMod <- getModule modSpec
     maybeCtorsVis <- getModuleImplementationField modConstructors
     maybeEntity <- getModuleImplementationField modEntity
+    maybeRelName <- getModuleImplementationField modRelationName
+
+    let nTypes =
+            sum $ fromEnum
+            <$> [isJust maybeCtorsVis, isJust maybeEntity, isJust maybeRelName]
+    unless (nTypes == 1)
+        $ shouldnt
+        $ "modTypeDeps: "
+            ++ showModSpec tyMod
+            ++ " is not exactly one of: constructor, entity or relation"
+
     if isJust maybeCtorsVis
     then do
-        tyParams <- getModule modParams
         let ctorsVis = reverse $ trustFromJust "modTypeDeps" maybeCtorsVis
-        ctors <- mapM (placedApply resolveCtorTypes . snd) ctorsVis
-        let deps = List.filter (`Set.member` modSet)
-                $ concatMap
-                    (catMaybes . (typeModule . paramType . content <$>)
-                    . procProtoParams . content)
-                    ctors
-        return ((tyMod, CtorDef tyParams ctorsVis), tyMod, deps)
+        modTypeDepsCtor modSet ctorsVis
     else if isJust maybeEntity
-    then do
-        tyMod <- getModule modSpec
-        entityVis <- trustFromJust "modTypeDeps"
-                        <$> getModuleImplementationField modEntity
-        entityModDict <- trustFromJust "modTypeDeps"
-                        <$> getModuleImplementationField modEntityModDict
-        proto <- placedApply resolveCtorTypes . snd $ entityVis
-        let deps = List.filter (`Set.member` modSet)
-                $ (catMaybes . (typeModule . paramType . content <$>)
-                    . procProtoParams . content)
-                    proto
-        return ((tyMod, EntityDef entityVis entityModDict), tyMod, deps)
-    else do
-        tyMod <- getModule modSpec
-        relName <- trustFromJust "modTypeDeps"
-                    <$> getModuleImplementationField modRelationName
-        (ety0, ety1) <- trustFromJust "modTypeDeps"
-                        <$> getModuleImplementationField modRelationEntities
-        -- TODO: Check that ety0 and ety1 are actually entity types
-        return ((tyMod, RelationDef relName ety0 ety1), tyMod, [])
+    then
+        modTypeDepsEntity modSet
+    else if isJust maybeRelName
+    then
+        modTypeDepsRelation
+    else
+        shouldnt "modTypeDeps: Not a ctor, entity or relation"
+
+
+-- | Return a list of type dependencies on types defined in the specified
+-- modules that are defined in the current module, which is a constructor
+modTypeDepsCtor :: Set ModSpec -> [(Visibility, Placed ProcProto)]
+                -> Compiler ((ModSpec,TypeDef), ModSpec, [ModSpec])
+modTypeDepsCtor modSet ctorsVis = do
+    tyMod <- getModule modSpec
+    tyParams <- getModule modParams
+    ctors <- mapM (placedApply resolveCtorTypes . snd) ctorsVis
+    let deps = List.filter (`Set.member` modSet)
+            $ concatMap
+                (catMaybes . (typeModule . paramType . content <$>)
+                . procProtoParams . content)
+                ctors
+    return ((tyMod, CtorDef tyParams ctorsVis), tyMod, deps)
+
+
+-- | Return a list of type dependencies on types defined in the specified
+-- modules that are defined in the current module, which is an entity
+modTypeDepsEntity :: Set ModSpec
+                  -> Compiler ((ModSpec,TypeDef), ModSpec, [ModSpec])
+modTypeDepsEntity modSet = do
+    tyMod <- getModule modSpec
+    entityVis <- trustFromJust "modTypeDeps"
+                    <$> getModuleImplementationField modEntity
+    entityModDict <- trustFromJust "modTypeDeps"
+                    <$> getModuleImplementationField modEntityModDict
+    proto <- placedApply resolveCtorTypes . snd $ entityVis
+    let deps = List.filter (`Set.member` modSet)
+                $ (catMaybes
+                    . (typeModule . paramType . content <$>)
+                    . procProtoParams
+                    . content) proto
+    return ((tyMod, EntityDef entityVis entityModDict), tyMod, deps)
+
+
+-- | Return a list of type dependencies on types defined in the specified
+-- modules that are defined in the current module, which is a relation
+modTypeDepsRelation :: Compiler ((ModSpec,TypeDef), ModSpec, [ModSpec])
+modTypeDepsRelation = do
+    tyMod <- getModule modSpec
+    relName <- trustFromJust "modTypeDeps"
+                <$> getModuleImplementationField modRelationName
+    (ety0, ety1) <- trustFromJust "modTypeDeps"
+                    <$> getModuleImplementationField modRelationEntities
+    -- TODO: Check that ety0 and ety1 are actually entity types
+    return ((tyMod, RelationDef relName ety0 ety1), tyMod, [])
+
 
 -- | Resolve constructor argument types.
 resolveCtorTypes :: ProcProto -> OptPos -> Compiler (Placed ProcProto)
@@ -477,9 +511,8 @@ completeType modspec (CtorDef params ctors) = do
 completeType modspec (EntityDef entityProtoVis@(vis, entityProto) entityModDict) = do
     logNormalise $ "Completing type " ++ showModSpec modspec
     reenterModule modspec
-    let typespec = TypeSpec [] currentModuleAlias []
     (entityProto', info) <- nonConstCtorInfo entityProtoVis 0
-    (rep, itemsList) <- entityItems typespec info entityModDict
+    (rep, itemsList) <- entityItems currModType info entityModDict
     setTypeRep rep
     logNormalise $ "Representation of type " ++ showModSpec modspec
                    ++ " is " ++ show rep
@@ -490,8 +523,7 @@ completeType modspec (EntityDef entityProtoVis@(vis, entityProto) entityModDict)
 completeType modspec relDef@(RelationDef relName ety0 ety1) = do
     logNormalise $ "Completing type " ++ showModSpec modspec
     reenterModule modspec
-    let typespec = TypeSpec [] currentModuleAlias []
-        (rep, itemsList) = relationItems typespec relName ety0 ety1
+    let (rep, itemsList) = relationItems currModType relName ety0 ety1
     setTypeRep rep
     logNormalise $ "Representation of type " ++ showModSpec modspec
                    ++ " is " ++ show rep
@@ -1387,16 +1419,13 @@ entityCreateItem vis entityName typeSpec params fields size pos keyNames =
             ++ [Param entityVariableName typeSpec ParamOut Ordinary
                 `maybePlace` pos]
 
-        nullEty = ForeignFn "lpvm" "cast" [] [Unplaced $ iVal 0] `withType` typeSpec
-        initEtyStmt = move nullEty $ varSet entityVariableName
+        initEtyStmt = move nullVal $ varSetTyped entityVariableName typeSpec
 
         (etyLookupVars, lookupStmts) = unzip $ keyLookupStmt entityName params <$> keyNames
 
         etyIsNotNullStmt etyVar =
-            Unplaced
-                $ ProcCall (regularProc "=") SemiDet False
-                    [Unplaced $ ForeignFn "lpvm" "cast" [] [Unplaced $ varGet etyVar] `withType` countType,
-                        Unplaced $ iVal 0 `withType` countType]
+            (identicalWith `on` Unplaced) (varGet etyVar) (iVal 0)
+
         testEtyLookupStmt = seqToStmt $ etyIsNotNullStmt <$> etyLookupVars
 
         (attrFieldInfos,

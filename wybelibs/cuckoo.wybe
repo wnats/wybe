@@ -11,8 +11,7 @@ pub use db
 pub def cuckoo:_(V) = cuckoo(INITIAL_TABLE_SIZE)
 
 # Return an empty cuckoo table with the specified size
-pub def cuckoo(size:count):_(V) =
-    cuckoo(empty_table(size), 0:count, 0:count)
+pub def cuckoo(size:count):_(V) = cuckoo(empty_table(size), 0:count, 0:count)
 
 # Insert `val` to `cuckoo` where `val2key` maps a value to its key and
 # `hash` is `cuckoo`'s hash function which hashes a key to some count
