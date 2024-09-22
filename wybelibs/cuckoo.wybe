@@ -8,10 +8,15 @@ pub use db
 ################################################################
 
 # Return an empty cuckoo table with the default size of INITIAL_TABLE_SIZE
-pub def cuckoo:_(V) = cuckoo(INITIAL_TABLE_SIZE)
+pub def cuckoo(?tab:_(V)) use !db {
+    !cuckoo(INITIAL_TABLE_SIZE, ?tab)
+}
 
 # Return an empty cuckoo table with the specified size
-pub def cuckoo(size:count):_(V) = cuckoo(empty_table(size), 0:count, 0:count)
+pub def cuckoo(size:count, ?tab:_(V)) use !db {
+    !empty_table(size, ?arr)
+    ?tab = cuckoo(arr, 0:count, 0:count)
+}
 
 # Insert `val` to `cuckoo` where `val2key` maps a value to its key and
 # `hash` is `cuckoo`'s hash function which hashes a key to some count
@@ -219,22 +224,21 @@ type table (T) {
     }
     
     # Return an empty cuckoo table of size len
-    pub def empty_table(len:count):_(T) = tab where {
+    pub def empty_table(len:count, ?tab:_(T)) use !db {
         ?size = len * WORD_SIZE_BYTES * N_TABLE
         foreign lpvm alloc(size, ?data)
         ?offset = 0:count
         do {
             while offset < size
-            foreign lpvm mutate(data, ?data, offset, 1, size, 0,
-                                foreign lpvm cast(EMPTY))
+            foreign lpvm unsafe_mutate(data, offset, foreign lpvm cast(EMPTY), !db)
             !offset += WORD_SIZE_BYTES
         }
         ?tab = table(len, data)
     }
 
     # Increase the size of tab and empty it
-    pub def next_size_empty(!tab:_(T)) {
-        ?tab = empty_table(next_table_size(tab^length))
+    pub def next_size_empty(!tab:_(T)) use !db {
+        !empty_table(next_table_size(tab^length), ?tab)
     }
 
     # val is the value stored at the idx position of tab
@@ -283,8 +287,8 @@ def set(cuckoo:_(V), idx:count, val:V) use !db {
 def length(cuckoo:_(V)):count = cuckoo^table^length
 
 # Increase the size of tab and empty it
-def next_size_empty(!cuckoo:_(V)) {
-    next_size_empty(!cuckoo^table)
+def next_size_empty(!cuckoo:_(V)) use !db {
+    !next_size_empty(!cuckoo^table)
     !cuckoo^item_count = 0:count
 }
 
@@ -345,7 +349,7 @@ def {noinline} rehash(!cuckoo:_(V), val2key:{resource}(V,?K),
     !cuckoo_vals(cuckoo, ?vals)
 
     do {
-        next_size_empty(cuckoo)
+        !next_size_empty(!cuckoo)
         incr(!cuckoo^rehash_count)
 
         ?val = evicted
