@@ -951,6 +951,12 @@ addEntity vis placedEntityProto entityModifiers = do
            $ "Declaring entity for type " ++ showModSpec currMod
            ++ " with declared constructor(s)"
 
+    -- Check for duplicate attribute names
+    let params = procProtoParams $ content placedEntityProto
+        attrs = paramName . content <$> params
+    unless (all ((==1) . length) $ group $ sort attrs)
+        $ errmsg pos "Duplicate attribute names"
+
     let defaultImports = [dbModSpec]
         cuckooImports = [hashModSpec, cuckooModSpec]
         imports = if List.null entityModifiers then defaultImports
