@@ -190,11 +190,17 @@ normaliseCuckooResources etyName entityMods pos = do
                             <$> indexMods
 
     mapM_
-        (\resName ->
+        (\resName -> do
+            -- Resources need to be initialised to some value, otherwise
+            -- the program will throw an error
             addSimpleResource
                 resName
-                (SimpleResource cuckooEtyType Nothing pos)
+                (SimpleResource cuckooEtyType (Just $ Unplaced nullVal) pos)
                 Public
+            -- Cuckoo table initialisation requires the db resource, which
+            -- can only be done with a proc (instead of a func)
+            normaliseItem $
+                StmtDecl (emptyCuckooTable resName cuckooEtyType) Nothing
         )
         (keyResNames ++ indexResNames)
 

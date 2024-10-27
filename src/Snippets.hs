@@ -293,7 +293,7 @@ castToCount exp =
 
 -- | Initialise an empty cuckoo table with the default size
 --   See cuckoo.cuckoo proc in wybelibs/cuckoo.wybe
-emptyCuckooTable :: Ident -> TypeSpec -> Placed Stmt
+emptyCuckooTable :: Ident -> TypeSpec -> Stmt
 emptyCuckooTable varName etyType =
-    Unplaced $ ProcCall (regularProc "cuckoo") Det True
+    ProcCall (regularProc "cuckoo") Det True
         [Unplaced $ varSetTyped varName etyType]
