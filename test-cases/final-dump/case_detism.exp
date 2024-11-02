@@ -1,0 +1,2 @@
+Error detected during type checking of module(s) case_detism
+module top-level code has test determinism, but declared normal (total)

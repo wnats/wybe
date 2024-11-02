@@ -13,17 +13,46 @@ object-oriented languages, but does not neatly fit into any of these
 paradigms.  Its main organising principle is **interface integrity**, which
 indicates that all information that flows between a procedure or function and
 its caller must be part of the interface (the signature) of that procedure or
-function.  Semantically, *values* are immutable (Wybe has
-[*value semantics*](https://en.wikipedia.org/wiki/Value_semantics)),
-but *variables* may be reassigned.  This means that data structures
+function.
+That is, Wybe does not have global or static variables, and all *values* are immutable (Wybe has
+[*value semantics*](https://en.wikipedia.org/wiki/Value_semantics)), ensuring that data structures
 may be passed around at will without worrying that they may be unexpectedly
-modified, yet conventional looping constructs can be used freely.
+modified.  In this way, Wybe is akin to a
+[functional](https://en.wikipedia.org/wiki/Functional_programming) or
+[logic](https://en.wikipedia.org/wiki/Logic_programming) programming language.
 
+However, Wybe allows variables to be reassigned,
+supports conventional looping constructs,
+and allows procedures to be defined as sequential
+computations.
+In place of global variables, Wybe supports [*resources*](#resources), which
+provide a syntactically lightweight way to pass information bidirectionally
+between a procedure and its callers.
+In these ways, Wybe is like an
+[imperative](https://en.wikipedia.org/wiki/Imperative_programming) programming
+language.
+
+A Wybe type is a module containing functions and procedures that operate on
+values of that type, and is thus an
+[abstract data type](https://en.wikipedia.org/wiki/Abstract_data_type).
+A Wybe type may specify any number of constructors,
+and Wybe ensures that code can only access the members of a datum that were provided in the constructor used
+to create that datum, and is therefore also an
+[algebraic data type](https://en.wikipedia.org/wiki/Algebraic_data_type).
+
+The Wybe compiler provides a few features to ensure high performance.
+First, it is a native code compiler, bypassing the interpretation or virtual machine overhead of
+some languages.
 In some cases the compiler can arrange for values to be destructively
 updated in place, as long as it can be sure that the original value of the
-data structure will never be accessed again.  Thus the compiler can generate
-efficient executables while ensuring that interface integrity is maintained.  
-
+data structure will never be accessed again.
+This still maintains interface integrity, while mitigating some of the
+performance penalty of declarative languages.
+The compiler employs *multiple specialisation*, automatically generating more efficient specialised versions
+of procedures and functions for use in contexts where conditions allow.
+The compiler also takes advantage of the language's interface integrity, such as
+by avoiding repeating a previous computation or carrying out a computation whose
+result is not needed.
 
 ## <a name="hello-world"></a>Hello, World!
 
@@ -66,7 +95,9 @@ Hello, World!
 
 Note that `wybemk` is like `make` in that you give it the name of the
 file you want it to build, and it figures out what files it needs
-to compile.
+to compile.  Currently, the Wybe compiler can generate an executable file, an
+object (.o) file, an LLVM assembler (.ll) file, an LLVM bitcode (.bc), and a
+native assembly language (.s) file from a wybe source file.
 
 ### Compiler Options
 
@@ -79,8 +110,8 @@ can be found with the following:
 
 #### Optimisation Options
 
-The `--llvm-opt-level` (`-O`) options specifies the level of optimisation used
-within the LLVM compiler during the compilations stage of a Wybe module. By default, this is set to 3, yet supports the values 0, 1, 2, or 3. More information
+The `--llvm-opt-level` (-O) option specifies the level of optimisation used
+within the LLVM compiler during the compilation stage of a Wybe module. By default, this is set to 3, yet supports the values 0, 1, 2, or 3. More information
 can be found [here](https://llvm.org/docs/CommandGuide/llc.html#id1).
 
 
@@ -240,7 +271,7 @@ More generally, the values of Wybe expressions can be included in strings by
 placing them within parentheses immediately preceded by a dollar sign.  For
 example, if `base` is 2 and `bits` is 63, then
 
-> `"maxint is $(base**bits-1) and minint is $(base**bits)"`
+> `"maxint is $(base**bits-1) and minint is $(-base**bits)"`
 
 denotes the string
 `"maxint is 9223372036854775807 and minint is -9223372036854775808"`
@@ -255,6 +286,31 @@ that `fmt` applied to strings returns the strings as is, without surrounding
 them with quotation marks.  Then
 string concatenation (`,,`) is used to assemble the string from its fixed
 parts and the results of the call(s) to `fmt`.
+
+The `$(`...`)` form can pass extra arguments to the `fmt` function simply by
+following the expression by a comma and the extra arguments to pass.
+There are overloaded versions of `fmt` that additionally take a field width
+argument, right justifying the value to be formatted in a field of (at least)
+that width.
+There are also versions that additionally take a fill character, which will be
+used to fill the field where the value is smaller than the specified field.
+For example,
+```
+!println "-6*7 = $(-6*7,5)"
+!println "-6*7 = $(-6*7,5,'0')"
+!println "-6*7 = $(-6*7,5,'*')"
+```
+will print:
+```
+-6*7 =   -42
+-6*7 = -0042
+-6*7 = **-42
+```
+
+There are overloaded versions of ```fmt``` with higher arities for some specific
+types; see the documentation for the types of interest to see what's available.
+You can interpolate your own types by defining a function `fmt` with your type
+as first argument and returning a `string`.
 
 ## Procedure calls
 
@@ -481,8 +537,7 @@ For example:
 pub def incr(!x:int) { ?x = x + 1 }
 ```
 
-
-## Functions *are* procedures
+## <a name="functions-are-procedures"></a> Functions *are* procedures
 
 Wybe functions are the same as procedures with one extra output
 argument, and in fact the compiler implements them that way.  Therefore,
@@ -518,6 +573,29 @@ is always equivalent to
 ```
 f(x, ?y)
 ```
+
+Alternatively, a function can be called as a statement to update one of the
+function's arguments by preceding that argument with an exclamation point (!).
+Of course, the type of the input to be updated must be the same as that of the
+function's output.  In the above example, if the input and output of `f` are
+the same type,
+```
+f(!x)
+```
+applies `f` to `x`, storing the result in `x`.  For example,
+```
+!x * 2
+```
+or
+```
+2 * !X
+```
+would double the value of `x`, and
+```
+1 / !x
+```
+would take the reciprocal of `x`.
+
 
 ## Anonymous procedures
 
@@ -660,7 +738,7 @@ Wybe also supports an alternative syntax for invoking procedures, functions, or
 constructors that puts the (first) argument first, and the procedure, function,
 or constructor name, with its other arguments, if any, second:
 
-> *arg*`^`*operation*(*other args*)
+> *arg*`^`*operation*`(`*other args*`)`
 
 and in the special case of operations taking only one argument:
 
@@ -767,8 +845,8 @@ otherwise indicated, they are infix operators.
 ## <a name="modes"></a>Modes
 
 It is permitted to define multiple procedures with the same name, as
-long as all of them have the same number and types of arguments in the
-same order, and different *modes*.  A mode is a combination of argument
+long as each of them have different parameter *types*
+or *modes*, or different arities.  A mode is a combination of argument
 directions.  This can be used to carry out computations in different
 directions.  For example:
 
@@ -802,6 +880,7 @@ actually replace the second statement with
 ?z = a
 ```
 
+
 ## <a name="tests"></a>Tests and partial functions
 
 Some procedure or function calls are *tests*.  This means that they can return
@@ -809,8 +888,8 @@ whatever output(s) they are meant to produce, assigning or reassigning variables
 as specified, or instead they can *fail*, in which case they do not produce
 their usual output(s), leaving all variables and resources as they were before
 the test began.
-Functions
-that may fail to produce a result are also known as *partial* functions.
+Functions that may fail to produce a result for some inputs are also known as
+*partial* functions.
 
 Test procedures and functions must be explicitly declared by inserting
 the modifier `test`, enclosed within curly braces, after the `def` keyword.
@@ -831,8 +910,8 @@ Tests can take several forms:
   *  Any procedure call containing one or more partial function calls is also a
      test; it succeeds only if all the partial function calls succeed, and when
      any call fails the test fails immediately.
-  * A sequence of statements including one or more statements is a test; it
-    succeeds if and only if all the statements succeed, and fails immediately if
+  * A sequence of statements including one or more tests is a test; it
+    succeeds if and only if all the tests succeed, and fails immediately if
     any test fails.
   * Any procedure or function call is a test if an input is provided
     where an output argument is expected.  In this case, the call is made
@@ -845,7 +924,8 @@ Tests can take several forms:
     add(x, y, xy)
     xy = add(x, y)
     ```
-
+  * A foreign language call can be a test; see the [foreign language
+    interface](#foreign-language-interface) section for details. 
   * Finally, a Boolean value by itself can also be used as a test, in which case
     `true` succeeds and `false` fails.  This applies both to Boolean variables
     and Boolean-valued functions.  However, tests are a more general facility
@@ -868,7 +948,14 @@ xs = [0 | ?rest]
 ```
 
 would succeed if `xs` is currently a list whose head is `0`, and would assign
-`rest` to the tail.  It would fail if `xs` does not match that pattern.
+`rest` to the tail.  It would fail if `xs` does not match that pattern, either
+because it is an empty list or because its head is not `0`.
+
+Note that all effects of a test are reverted if the test fails, including
+reassignments of variables or modifications of resources.  However, some
+effects, such as performing input/output, cannot be reverted, and therefore
+these effects cannot be performed within a test.  The compiler will issue an
+error message in such cases.
 
 
 ## <a name="reification"></a>Reification of tests
@@ -1551,10 +1638,15 @@ A resource can be declared at the level of a module, as follows:
 
 > `resource` *name*`:`*type*
 
-It may optionally specify an initial value, in which case the resource is
-defined throughout the execution of the program.
+It may optionally specify an initial value:
 
 > `resource` *name*`:`*type* `=` *expr*
+
+In this case, the resource is
+defined in any top level code in that module, as well as any top level code in
+any module that `use`s this module, but not in any module that this module
+`use`s.  The latter restriction is necessary because when two modules depend on
+one another, the order in which their resources are initialised is unspecified.
 
 A resource may be exported, allowing it to be referred to in other modules, by
 preceding the `resource` declaration with the `pub` keyword.
@@ -1664,6 +1756,14 @@ in that context is used.  Thus, a procedure can obtain information about the
 context in which it is called simply by using the appropriate resources.
 However, if that procedure is called from another procedure that uses that
 resource, the caller's caller's calling context will be used instead.
+
+Because implicit resources are read-only and available everywhere, a
+call to a 
+procedure that uses only implicit resources need not be preceded with an
+exclamation mark.  Similarly, a procedure that uses no non-implicit resources
+can be called using function application syntax.  However, because the `use`
+syntax is not permitted in function declarations, it must be defined as a
+procedure (see the [Functions are Procedures](#functions-are-procedures) section).
 
 The implicit resources supported by Wybe are:
 
@@ -1966,7 +2066,7 @@ so be careful to get the call right.
 
 The form of a foreign call is:
 
-> `foreign` *language* *function*(*arg*, *arg*, ...)
+> `foreign` *language* *function*`(`*arg*, *arg*, ...`)`
 
 where *language* is the name of the foreign language the function is written in,
 *function* is the name of the foreign function to call, and the *arg*s are the
@@ -1994,7 +2094,7 @@ Foreign calls may optionally specify *modifiers* to provide extra information
 useful to the Wybe compiler.  If modifiers are to be specified, they are written 
 after the *language* name:
 
-> `foreign` *language* `{`*modifiers*`}` *function*(*arg*, *arg*, ...)
+> `foreign` *language* `{`*modifiers*`}` *function*`(`*arg*, *arg*, ...`)`
 
 where *modifiers* is a comma-separate sequence of identifiers specifying this
 information.  Supported modifiers in foreign calls are:
@@ -2006,7 +2106,11 @@ information.  Supported modifiers in foreign calls are:
 - **unique**:  do not report [uniqueness errors](#unique-types) arising from use
   of unique arguments to the call (but do note the use or definition of unique
   arguments)
-
+- **test**:  the call is a [test](#tests); that is, it has one extra output argument,
+  beyond those explicitly provided, which indicates whether the call succeeds.
+  Where *language* is `llvm`, the output argument is a 1 bit integer; otherwise
+  the output argument is an `int`, which indicates success for any value other
+  than 0.
 
 For example, the `exit` proc in the standard library is implemented as
 follows:
@@ -2016,6 +2120,39 @@ pub def {terminal,semipure} exit(code:int) {
     foreign c {terminal,semipure} exit(code)
 }
 ```
+and the less than test for integers is defined as
+```
+pub def {test} (x:_ <  y:_) { foreign llvm {test} icmp_slt(x,y) }
+```
+
+##### Foreign procedure definition short-hand
+
+For convenince, a short-hand syntax is provided to define a Wybe procedure to interface
+with a foriegn procedure. This syntax is as follows:
+
+> `def` `foreign` *language* *function*`(`*param*, *param*, ...`)`
+
+which is equivalent to defining the following:
+
+> `def` *function*`(`*param*, *param*, ...`)` `{` `foreign` *language* *function*`(`*param*, *param*, ...`)` `}`
+
+Note that all parameters must be typed.
+
+Resources can optionally be specified with a `use` clause, that follows the same syntax
+for a regular Wybe procedure definition. Resources are added as additonal arguments to 
+the foreign call after the other arguments, in the order specified in the source code.
+If resources are repeated in the `use` clause, they are added as multiple arguments in 
+the generated foreign call.
+
+Modifiers can also optionally be specified, with the syntax being identical to a Wybe 
+procedure definition, and are added to the foreign procedure call. 
+In addition, inlining (`inline`, `noinline`) can be specified for the for a 
+foreign procedure, but only inline/don't inline the generated Wybe procedure, and don't 
+apply to the generated foreign call.
+
+With both resources and modifiers, this would be as follows:
+
+> `def` `foreign` *language* `{` *modifiers* `}` *function*`(`*param*, *param*, ...`)` `use` *resources*
 
 
 #### Using LLVM instructions
@@ -2108,18 +2245,46 @@ Floating point multiplication
 Floating point division
 - `foreign llvm frem(`arg1:float, arg2:float`)`:float
 Floating point remainder
-- `foreign llvm fcmp_eq(`arg1:float, arg2:float`)`:bool
+
+
+##### Floating point comparisons
+
+Floating point comparisons are either *ordered* or *unordered*, the former
+returning false if either comparand is not a number (NaN), while the latter sort
+return true in that case.
+
+- `foreign llvm fcmp_false(`arg1:float, arg2:float`)`:bool
+Always returns false with no comparison
+- `foreign llvm fcmp_oeq(`arg1:float, arg2:float`)`:bool
 Floating point equality
-- `foreign llvm fcmp_ne(`arg1:float, arg2:float`)`:bool
+- `foreign llvm fcmp_ogt(`arg1:float, arg2:float`)`:bool
+Floating point strictly greater
+- `foreign llvm fcmp_oge(`arg1:float, arg2:float`)`:bool
+Floating point greater or equal
+- `foreign llvm fcmp_olt(`arg1:float, arg2:float`)`:bool
+Floating point strictly less
+- `foreign llvm fcmp_ole(`arg1:float, arg2:float`)`:bool
+Floating point less or equal
+- `foreign llvm fcmp_one(`arg1:float, arg2:float`)`:bool
 Floating point disequality
-- `foreign llvm fcmp_slt(`arg1:float, arg2:float`)`:bool
-Floating point (signed) strictly less
-- `foreign llvm fcmp_sle(`arg1:float, arg2:float`)`:bool
-Floating point (signed) less or equal
-- `foreign llvm fcmp_sgt(`arg1:float, arg2:float`)`:bool
-Floating point (signed) strictly greater
-- `foreign llvm fcmp_sge(`arg1:float, arg2:float`)`:bool
-Floating point (signed) greater or equal
+- `foreign llvm fcmp_ord(`arg1:float, arg2:float`)`:bool
+Floating point ordered (neither is a NaN)
+- `foreign llvm fcmp_ueq(`arg1:float, arg2:float`)`:bool
+Floating point unordered or equal
+- `foreign llvm fcmp_ugt(`arg1:float, arg2:float`)`:bool
+Floating point unordered or strictly greater
+- `foreign llvm fcmp_uge(`arg1:float, arg2:float`)`:bool
+Floating point unordered or greater or equal
+- `foreign llvm fcmp_ult(`arg1:float, arg2:float`)`:bool
+Floating point unordered or strictly less
+- `foreign llvm fcmp_ule(`arg1:float, arg2:float`)`:bool
+Floating point unordered or less or equal
+- `foreign llvm fcmp_une(`arg1:float, arg2:float`)`:bool
+Floating point unordered or not equal
+- `foreign llvm fcmp_uno(`arg1:float, arg2:float`)`:bool
+Floating point unordered (either is a NaN)
+- `foreign llvm fcmp_true(`arg1:float, arg2:float`)`:bool
+Always returns true with no comparison
 
 #####  <a name="conversion"></a>Integer/floating point conversion
 
@@ -2146,17 +2311,20 @@ declaration has the form:
 
 where *rep* has one of these forms:
 
-- `address`
-the type is a machine address, similar to the `void *` type in C.
-- *n* `bit` *numbertype*
-a primitive number type comprising *n* bits, where *n* is any non-negative
-integer and *numbertype* is one of:
-  - `signed`
-  a signed integer type
-  - `unsigned`
-  an unsigned integer type
-  - `float`
-  a floating point number; *n* must be 16, 32, 64, or 128.
+- `pointer`
+ the type is the address of a Wybe data structure.  Foreign code should not
+treat this as an ordinary pointer.
+- `opaque`
+the type is a machine address, similar to the `void *` type in C.  Wybe treats such values as opaque.
+- *n* `bit signed`
+a signed primitive number type comprising *n* bits, where *n* is any positive
+integer.  Represents integers between -2<sup>*n*-1</sup> and 2<sup>*n*-1</sup>-1 inclusive.
+- *n* `bit unsigned`
+an unsigned primitive number type comprising *n* bits, where *n* is any non-negative
+integer. Represents integers between 0 and 2<sup>*n*</sup>-1 inclusive.
+- *n* `bit float`
+a floating point number type comprising *n* bits, where *n* is one of 16, 32,
+64, or 128.  
 
 Like a `constructor` declaration, a `representation` declaration makes the
 enclosing module into type.  Also like a `constructor` declaration, a submodule

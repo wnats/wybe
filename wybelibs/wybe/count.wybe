@@ -8,6 +8,16 @@ use wybe.control, wybe.c_string
 
 representation is unsigned
 
+## Constants
+
+def bound_minimum:_ = 0:_
+def bound_maximum:_ = 18_446_744_073_709_551_615:_
+
+# Overloaded versions based on an argument
+def bound_minimum(x:_):_ = bound_minimum
+def bound_maximum(x:_):_ = bound_maximum
+
+
 ## Common count operations
 
 # Addition.  This operation is reversible:  you can compute either argument from
@@ -75,14 +85,14 @@ pub def and(x:_, y:_):_ = foreign llvm and(x, y)
 ## Comparisons
 
 # Equality and disequality.
-pub def (x:_ =  y:_):bool = foreign llvm icmp_eq(x,y)
-pub def (x:_ ~= y:_):bool = foreign llvm icmp_ne(x,y)
+pub def {test} (x:_ =  y:_) { foreign llvm {test} icmp_eq(x,y) }
+pub def {test} (x:_ ~= y:_) { foreign llvm {test} icmp_ne(x,y) }
 
 # Inequalities.
-pub def (x:_ <  y:_):bool = foreign llvm icmp_ult(x,y)
-pub def (x:_ <= y:_):bool = foreign llvm icmp_ule(x,y)
-pub def (x:_ >  y:_):bool = foreign llvm icmp_ugt(x,y)
-pub def (x:_ >= y:_):bool = foreign llvm icmp_uge(x,y)
+pub def {test} (x:_ <  y:_) { foreign llvm {test} icmp_ult(x,y) }
+pub def {test} (x:_ <= y:_) { foreign llvm {test} icmp_ule(x,y) }
+pub def {test} (x:_ >  y:_) { foreign llvm {test} icmp_ugt(x,y) }
+pub def {test} (x:_ >= y:_) { foreign llvm {test} icmp_uge(x,y) }
 
 # Three-way comparison.
 pub def (x:_ <=> y:_):comparison = 
@@ -105,11 +115,21 @@ pub def incr(!x:_) { ?x = x + 1:_ }
 pub def {partial} decr(!x:_) { ?x = x - 1:_ }
 
 ## Formatting
-pub def fmt(x:_):string = s where
-    { ?s = (if {x >= 10:_ :: fmt(x/10:_) | else :: ""})
-         ,, chr(ord('0')+int(x%10:_))
-    | !error("can't happen!")
-    }
+pub def fmt(x:_):string = fmt(x, 0)
+
+pub def fmt(x:_, minlength:int):string = fmt(x, minlength, ' ')
+
+pub def fmt(n:_, minlength:int, fill:char):string =
+    (if { n = 0:_ :: "0"
+        | else    :: fmtnz(n, minlength, fill)
+    })
+
+def fmtnz(n:_, minlength:int, fill:char):string =
+    (if { n = 0:_ :: repetition(fill, max(0,minlength))
+        | else    ::
+            fmtnz(n/10:_, minlength-1, fill) ,,
+                (chr(ord('0')+int(n%10:_)) | shouldnt)
+    })
 
 
 ## I/O

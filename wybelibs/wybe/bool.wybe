@@ -3,9 +3,18 @@
 
 pragma no_standard_library  # Standard library can't depend on itself!
 
-use wybe.c_string, wybe.string, wybe.io
+use wybe.c_string, wybe.string, wybe.char, wybe.int, wybe.io
 
 pub constructors false | true
+
+## Constants
+
+def bound_minimum:_ = false
+def bound_maximum:_ = true
+
+# Overloaded versions based on an argument
+def bound_minimum(x:_):_ = bound_minimum
+def bound_maximum(x:_):_ = bound_maximum
 
 ## Common Boolean operations
 
@@ -45,8 +54,12 @@ pub def succeed { pass } # always succeed
 ## Formatting
 pub def fmt(x:_):string = if { x :: "true" | else :: "false" }
 
-## I/O
+pub def fmt(x:_, minlength:int):string = fmt(x, minlength, ' ')
 
+pub def fmt(x:_, minlength:int, fill:char):string = fmt(fmt(x), minlength, fill)
+
+
+## I/O
 pub def print(x:_) use !io { !print(if {x:: c"true" | else:: c"false"}) }
 
 pub def println(x:_) use !io { !print(x); !nl }

@@ -8,6 +8,7 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE TupleSections #-}
+{-# LANGUAGE EmptyCase #-}
 
 -- |The abstract syntax tree, and supporting types and functions.
 --  This includes the parse tree, as well as the AST types, which
@@ -18,7 +19,7 @@ module AST (
   -- *Types just for parsing
   Item(..), Visibility(..), isPublic,
   Determinism(..), determinismLEQ, determinismJoin, determinismMeet,
-  determinismFail, determinismSucceed,
+  disjunctionDeterminism, determinismFail, determinismSucceed,
   determinismSeq, determinismProceding, determinismName, determinismCanFail,
   impurityName, impuritySeq, expectedImpurity,
   inliningName,
@@ -40,7 +41,7 @@ module AST (
   TypeRepresentation(..), TypeFamily(..), typeFamily,
   defaultTypeRepresentation, typeRepSize, integerTypeRep,
   defaultTypeModifiers,
-  lookupTypeRepresentation, lookupModuleRepresentation,
+  lookupTypeRepresentation, lookupModuleRepresentation, argIsReal,
   paramIsPhantom, argIsPhantom, typeIsPhantom, repIsPhantom,
   primProtoParamNames,
   protoRealParams, realParams, paramIsReal, paramIsNeeded,
@@ -57,8 +58,9 @@ module AST (
   emptyInterface, emptyImplementation,
   getParams, getPrimParams, getDetism, getProcDef, getProcPrimProto,
   mkTempName, updateProcDef, updateProcDefM,
-  ModSpec, maybeModPrefix, ProcImpln(..), ProcDef(..), procInline, procCallCount,
-  transformModuleProcs,
+  ModSpec, validModuleName, maybeModPrefix,
+  ProcImpln(..), ProcDef(..), procBody, allProcBodies, procInline,
+  procCallCount, transformModuleProcs,
   getProcGlobalFlows,
   primImpurity, flagsImpurity, flagsDetism,
   AliasMap, aliasMapToAliasPairs, ParameterID, parameterIDToVarName,
@@ -72,12 +74,12 @@ module AST (
   argDescription, argIntVal, trustArgInt, setParamType, paramIsResourceful,
   setPrimParamType, setTypeFlowType,
   flowsIn, flowsOut, primFlowToFlowDir, isInputFlow, isOutputFlow,
-  foldStmts, foldExps, foldBodyPrims, foldBodyDistrib,
+  foldStmts, foldExps, foldBodyPrims, foldBodyDistrib, mapLPVMBodyM,
   expToStmt, seqToStmt, stmtsImpurity, stmtImpurity, procCallToExp,
   stmtsInputs, expOutputs, pexpListOutputs, expInputs, pexpListInputs,
   setExpTypeFlow, setPExpTypeFlow,
-  Prim(..), primArgs, replacePrimArgs, 
-  primGlobalFlows, argGlobalFlow, argsGlobalFlows, effectiveGlobalFlows, 
+  Prim(..), primArgs, replacePrimArgs,
+  primGlobalFlows, argGlobalFlow, argsGlobalFlows, effectiveGlobalFlows,
   argIsVar, argIsConst, argIntegerValue,
   varsInPrims, varsInPrim, varsInPrimArgs, varsInPrimArg,
   ProcSpec(..), PrimVarName(..), PrimArg(..), PrimFlow(..), ArgFlowType(..),
@@ -104,7 +106,7 @@ module AST (
   genProcName, addImport, doImport, importFromSupermodule, lookupType, lookupType',
   typeIsUnique,
   ResourceName, ResourceSpec(..), ResourceFlowSpec(..), ResourceImpln(..),
-  initialisedResources,
+  initialisedResources, initialisedVisibleResources,
   addSimpleResource, lookupResource,
   specialResources, specialResourcesSet, isSpecialResource,
   publicResource, resourcefulName,
@@ -112,7 +114,6 @@ module AST (
   setDetism, setInline, setImpurity, setVariant,
   ProcVariant(..), Inlining(..), Impurity(..),
   addProc, addProcDef, lookupProc, publicProc, callTargets,
-  specialChar, specialName, specialName2,
   outputVariableName, outputStatusName,
   envParamName, envPrimParam, makeGlobalResourceName,
   entityVariableName,
@@ -127,7 +128,7 @@ module AST (
   showBody, showPlacedPrims, showStmt, showBlock, showProcDef,
   showProcIdentifier, showProcName,
   showModSpec, showModSpecs, showResources, showOptPos, showProcDefs, showUse,
-  shouldnt, nyi, checkError, checkValue, trustFromJust, trustFromJustM,
+  shouldnt, should, nyi, checkError, checkValue, trustFromJust, trustFromJustM,
   flowPrefix, showProcModifiers, showProcModifiers', showFlags, showFlags',
   showMap, showVarMap, simpleShowMap, simpleShowSet, bracketList,
   maybeShow, showMessages, stopOnError,
@@ -139,7 +140,8 @@ module AST (
   ) where
 
 import           Config (magicVersion, wordSize, objectExtension,
-                         sourceExtension, currentModuleAlias)
+                         sourceExtension, currentModuleAlias,
+                         specialChar, specialName, specialName2,)
 import           Control.Monad
 import           Control.Monad.Extra
 import           Control.Monad.Trans (lift,liftIO)
@@ -148,7 +150,7 @@ import           Crypto.Hash
 import qualified Data.Binary
 import qualified Data.ByteString.Lazy as BL
 import           Data.List as List
-import           Data.List.Extra (nubOrd,splitOn)
+import           Data.List.Extra (nubOrd,splitOn, disjoint)
 import           Data.Map as Map
 import           Data.Maybe
 import           Data.Set as Set
@@ -171,7 +173,7 @@ import           System.Console.ANSI
 
 import           GHC.Generics (Generic)
 
-import qualified LLVM.AST as LLVMAST
+-- import qualified LLVM.AST as LLVMAST
 import Data.Binary (Binary)
 
 ----------------------------------------------------------------
@@ -190,9 +192,9 @@ data Item
      | ImportForeign [FilePath] OptPos
      | ImportForeignLib [Ident] OptPos
      | ResourceDecl Visibility ResourceName TypeSpec (Maybe (Placed Exp)) OptPos
-       -- The Bool in the next two indicates whether inlining is forced
      | FuncDecl Visibility ProcModifiers ProcProto TypeSpec (Placed Exp) OptPos
      | ProcDecl Visibility ProcModifiers ProcProto [Placed Stmt] OptPos
+     | ForeignProcDecl Visibility Ident ProcModifiers ProcProto OptPos
      | EntityDecl Visibility (Placed ProcProto) [EntityModifier] OptPos
      | StmtDecl Stmt OptPos
      | PragmaDecl Pragma
@@ -255,11 +257,20 @@ determinismJoin det1 det2 = max det1 det2
 determinismSeq :: Determinism -> Determinism -> Determinism
 determinismSeq Terminal _        = Terminal
 determinismSeq Failure  _        = Failure
--- NonDet Failure = Failure
--- NonDet Terminal = Failure
+-- determinismSeq NonDet Failure = Failure
+-- determinismSeq NonDet Terminal = Failure
 determinismSeq _        Terminal = Terminal
 determinismSeq _        Failure  = Failure
 determinismSeq det1     det2     = max det1 det2
+
+
+-- |Determinism of a disjunction.  This is rather different from a join;
+-- it is not commutative because of sequencing.
+disjunctionDeterminism :: Determinism -> Determinism -> Determinism
+disjunctionDeterminism Terminal _ = Terminal
+disjunctionDeterminism Det _ = Det
+disjunctionDeterminism Failure detism = detism
+disjunctionDeterminism SemiDet detism = determinismJoin Det detism
 
 
 -- |Does this determinism reflect a state that could continue to the next
@@ -288,14 +299,20 @@ determinismCanFail Det      = False
 determinismCanFail SemiDet  = True
 
 
--- | Internal representation of data
+-- | Internal representation of data.
+-- Because Wybe uses a tagged representation for data structures, which requires
+-- integer and bit operations, while C and LLVM do not, we distinguish between
+-- two different kinds of pointers:  Pointer for possibly tagged pointers used
+-- for Wybe data structures and CPointer for untagged pointers (just raw
+-- addresses) used for C and LLVM code.
 data TypeRepresentation
-    = Address           -- ^ A pointer; occupies wordSize bits
+    = Pointer           -- ^ A (possibly tagged) pointer as represented in Wybe
     | Bits Int          -- ^ An unsigned integer representation
     | Signed Int        -- ^ A signed integer representation
     | Floating Int      -- ^ A floating point representation
     | Func [TypeRepresentation] [TypeRepresentation]
                         -- ^ A function pointer with inputs and outputs
+    | CPointer          -- ^ A pointer as represented in C
     deriving (Eq, Ord, Generic)
 
 
@@ -310,7 +327,8 @@ typeRepSize (Bits bits)     = bits
 typeRepSize (Signed bits)   = bits
 typeRepSize (Floating bits) = bits
 typeRepSize (Func _ _)      = wordSize
-typeRepSize Address         = wordSize
+typeRepSize Pointer         = wordSize
+typeRepSize CPointer        = wordSize
 
 
 -- | The type representation is for a (signed or unsigned) integer type
@@ -667,8 +685,7 @@ getSpecModule context getter spec = do
     --   " matching modules under compilation"
     case curr of
         []    -> gets (maybe (error msg) getter . Map.lookup spec . modules)
-        [mod] -> return $ getter mod
-        _     -> shouldnt "getSpecModule: multiple modules with same spec"
+        (mod:_) -> return $ getter mod
 
 
 -- | Is the specified module a type?  Determined by checking if it has a
@@ -894,9 +911,9 @@ addConstructor vis pctor = do
            ++ " with declared representation"
     pctors <- fromMaybe [] <$> getModuleImplementationField modConstructors
     let redundant =
-          any (\c -> procProtoName c == procProtoName ctor
+          any ((\c -> procProtoName c == procProtoName ctor
                 && length (procProtoParams c) == length (procProtoParams ctor))
-          $ content . snd <$> pctors
+                . content . snd) pctors
     when redundant
       $  errmsg pos
            $ "Declaring constructor for type " ++ showModSpec currMod
@@ -980,10 +997,10 @@ lookupType' context pos ty@HigherOrderType{higherTypeParams=typeFlows} = do
     (msgs, types) <- unzip <$> mapM (lookupType' context pos . typeFlowType) typeFlows
     return (concat msgs,
             ty{higherTypeParams=zipWith TypeFlow types (typeFlowMode <$> typeFlows)})
-lookupType' context pos ty@(TypeSpec [] typename args)
+lookupType' context pos (TypeSpec [] typename args)
   | typename == currentModuleAlias = do
     currMod <- getModuleSpec
-    return ([], TypeSpec (init currMod) (last currMod) args)
+    lookupType' context pos $ TypeSpec (init currMod) (last currMod) args
 lookupType' context pos ty@(TypeSpec mod name args) = do
     currMod <- getModuleSpec
     logAST $ "In module " ++ showModSpec currMod
@@ -1626,15 +1643,14 @@ data ModuleImplementation = ModuleImplementation {
                                               -- ^Resources visible to this mod
     modKnownProcs:: Map Ident (Set ProcSpec), -- ^Procs visible to this module
     modForeignObjects:: Set FilePath,         -- ^Foreign object files used
-    modForeignLibs:: Set String,              -- ^Foreign libraries used
-    modLLVM :: Maybe LLVMAST.Module           -- ^Module's LLVM representation
+    modForeignLibs:: Set String               -- ^Foreign libraries used
     } deriving (Generic)
 
 emptyImplementation :: ModuleImplementation
 emptyImplementation =
     ModuleImplementation Set.empty Map.empty Nothing Map.empty Map.empty
                          Map.empty Nothing Nothing Nothing Nothing Map.empty
-                         Map.empty Map.empty Set.empty Set.empty Nothing
+                         Map.empty Map.empty Set.empty Set.empty -- Nothing
 
 
 -- These functions hack around Haskell's terrible setter syntax
@@ -1743,6 +1759,12 @@ instance Show TypeVarName where
 type ModSpec = [Ident]
 
 
+-- |Check that a module name component is valid (ie, does not contain invalid
+-- characters).  Currently only period (.) and hash (#) are considered invalid.
+validModuleName :: Ident -> Bool
+validModuleName = not . any (`elem` ['.',specialChar])
+
+
 -- |The uses one module makes of another; first the public imports,
 --  then the privates.  Each is either Nothing, meaning all exported
 --  names are imported, or Just a set of the specific names to import.
@@ -1805,7 +1827,7 @@ doImport mod (imports, _) = do
              ++ intercalate ", " (showProcName <$> Map.keys importedProcs)
     -- XXX Must report error for imports of non-exported items
     let knownTypes = Map.unionWith Set.union (modKnownTypes impl)
-                     $ Map.fromAscList
+                     $ Map.fromList
                      $ List.map (mapSnd Set.singleton) importedTypesAssoc
     let knownResources =
             Map.unionWith Set.union (modKnownResources impl) $
@@ -1939,29 +1961,27 @@ data ResourceImpln =
         } deriving (Generic, Eq)
 
 
--- | Return the initialised resources *defined* by the current module, and
--- initialised resources *visible* in the current module.  The former are
--- explicitly initialised by the current module's main proc, and the latter
--- are usable there, so the former are out-only resources for it, and the
--- latter are in/out.
-initialisedResources :: Compiler (ResourceDef,ResourceDef)
+-- | Return the initialised resources *defined* by the current module.
+initialisedResources :: Compiler ResourceDef
 initialisedResources = do
     currMod <- getModuleSpec
     localRes <- getModuleImplementationField modResources
     let localDefs = Map.filter (isJust . resourceInit) $ Map.unions localRes
+    logAST $ "      local resources = " ++ show localRes
+    logAST $ "    local initialised = " ++ show localDefs
+    return localDefs
+
+
+-- | Return the initialised resources *visible* to the current module.
+initialisedVisibleResources :: Compiler ResourceDef
+initialisedVisibleResources = do
     visableRes <- Set.toList . Set.unions . Map.elems
                  <$> getModuleImplementationField modKnownResources
     visibleDefs <- Map.filter (isJust . resourceInit) . Map.unions . catMaybes
                <$> mapM lookupResource visableRes
-    logAST $ "Getting initialised resources defined and visible in module "
-                ++ showModSpec currMod
-    logAST $ "      local resources = " ++ show localRes
-    logAST $ "    local initialised = " ++ show localDefs
     logAST $ "    visible resources = " ++ show visableRes
     logAST $ "  visible initialised = " ++ show visibleDefs
-    when (localDefs /= visibleDefs)
-      $ logAST $ "   NB:  different old initialised = " ++ show visibleDefs
-    return (localDefs,visibleDefs)
+    return visibleDefs
 
 
 -- |A proc definition, including the ID, prototype, the body,
@@ -2014,6 +2034,26 @@ transformModuleProcs trans thisMod = do
                                   (modProcs imp) })
     reexitModule
 
+
+-- | Return the LPVM-form proc body, if the proc has been compiled to LPVM
+procBody :: ProcDef -> Maybe ProcBody
+procBody def =
+    case procImpln def of
+        ProcDefSrc{}                     -> Nothing
+        ProcDefPrim{procImplnBody=body}  -> Just body
+
+
+-- | Return all the LPVM-form proc bodies available, including the main body and
+-- all specialisations.  Anything that hasn't been compiled to LPVM is silently
+-- omitted.
+allProcBodies :: ProcDef -> [ProcBody]
+allProcBodies def =
+    case procImpln def of
+        ProcDefSrc{}                     -> []
+        ProcDefPrim{procImplnBody=body, procImplnSpeczBodies=specz} ->
+             body : catMaybes (Map.elems specz)
+
+
 -- |Whether this proc should definitely be inlined, either because the user said
 -- to, or because we inferred it would be a good idea.
 procInline :: ProcDef -> Bool
@@ -2027,7 +2067,7 @@ getProcGlobalFlows pspec = do
     case procImpln pDef of
       ProcDefSrc _ ->
             let ProcProto _ params resFlows = procProto pDef
-                paramFlows 
+                paramFlows
                     | any (isResourcefulHigherOrder . paramType . content) params
                     = UniversalSet
                     | otherwise
@@ -2201,9 +2241,9 @@ univGlobalFlows = GlobalFlows UniversalSet UniversalSet UniversalSet
 -- In the case we have a higher order resourceful argument, we may not know
 -- exactly which global variables flow into or out of a procedure, and as such
 -- we take a conservative approach and assume all do.
-makeGlobalFlows :: [(ParameterID, PrimParam)] -> Set ResourceFlowSpec -> GlobalFlows
+makeGlobalFlows :: [(ParameterID, PrimParam)] -> [ResourceFlowSpec] -> GlobalFlows
 makeGlobalFlows params resFlows =
-    Set.fold addGlobalResourceFlows 
+    List.foldr addGlobalResourceFlows 
         (emptyGlobalFlows{globalFlowsParams=pFlows}) resFlows
   where
     pFlows = FiniteSet $ Set.fromList $ catMaybes $ List.map (uncurry paramFlow) params
@@ -2224,9 +2264,9 @@ addGlobalResourceFlows (ResourceFlowSpec res flow) gFlows
 -- | Add a GlobalInfo to the set of global flows associated with the given flow
 addGlobalFlow :: GlobalInfo -> PrimFlow -> GlobalFlows -> GlobalFlows
 addGlobalFlow info FlowIn gFlows@GlobalFlows{globalFlowsIn=ins}
-    = gFlows{globalFlowsIn=whenFinite (Set.insert info) ins}
+    = gFlows{globalFlowsIn=USet.insert info ins}
 addGlobalFlow info FlowOut gFlows@GlobalFlows{globalFlowsOut=outs}
-    = gFlows{globalFlowsOut=whenFinite (Set.insert info) outs}
+    = gFlows{globalFlowsOut=USet.insert info outs}
 -- global flows don't use this flow type
 addGlobalFlow info FlowOutByReference gFlows = gFlows
 addGlobalFlow info FlowTakeReference gFlows = gFlows
@@ -2245,9 +2285,9 @@ hasGlobalFlow GlobalFlows{globalFlowsIn=ins, globalFlowsOut=outs} flow info
 -- | Take the union of the sets of two global flows
 globalFlowsUnion :: GlobalFlows -> GlobalFlows -> GlobalFlows
 globalFlowsUnion (GlobalFlows ins1 outs1 params1) (GlobalFlows ins2 outs2 params2)
-    = GlobalFlows 
-        (USet.union ins1 ins2) 
-        (USet.union outs1 outs2) 
+    = GlobalFlows
+        (USet.union ins1 ins2)
+        (USet.union outs1 outs2)
         (USet.union params1 params2)
 
 globalFlowsUnions :: [GlobalFlows] -> GlobalFlows
@@ -2256,11 +2296,11 @@ globalFlowsUnions = List.foldr globalFlowsUnion emptyGlobalFlows
 
 -- | Take the intersection of the sets of two global flows
 globalFlowsIntersection :: GlobalFlows -> GlobalFlows -> GlobalFlows
-globalFlowsIntersection (GlobalFlows ins1 outs1 params1) 
+globalFlowsIntersection (GlobalFlows ins1 outs1 params1)
                         (GlobalFlows ins2 outs2 params2)
-    = GlobalFlows 
-        (USet.intersection ins1 ins2) 
-        (USet.intersection outs1 outs2) 
+    = GlobalFlows
+        (USet.intersection ins1 ins2)
+        (USet.intersection outs1 outs2)
         (USet.intersection params1 params2)
 
 
@@ -2584,6 +2624,7 @@ foldExp' _   _   val FloatValue{} pos = val
 foldExp' _   _   val StringValue{} pos = val
 foldExp' _   _   val CharValue{} pos = val
 foldExp' _   _   val Var{} pos = val
+foldExp' _   _   val FailExpr pos = val
 foldExp' _   _   val (Global _) pos = val
 foldExp' sfn efn val (Closure _ es) pos = foldExps sfn efn pos val es
 foldExp' sfn efn val (AnonProc _ _ pstmts _ _) pos = foldStmts sfn efn val pstmts
@@ -2668,6 +2709,43 @@ foldBodyDistrib primFn emptyConj abDisj abConj (ProcBody pprims fork) =
         List.foldl (\a b -> abDisj a $ foldBodyDistrib primFn common abDisj abConj b)
         (foldBodyPrims primFn common abDisj body)
         $ bodies ++ maybeToList deflt
+
+
+-- |Traverse a ProcBody applying a monadic primFn to every Prim and applying a
+-- monadic argFn to every arg.  This code does nothing to track where the
+-- Prims and PrimArgs appear.
+mapLPVMBodyM :: Monad m => (Prim -> m ()) -> (PrimArg -> m ()) -> ProcBody
+             -> m ()
+mapLPVMBodyM primFn argFn (ProcBody pprims fork) = do
+    mapM_ (mapSinglePrimM primFn argFn . content) pprims
+    case fork of
+        NoFork -> return ()
+        (PrimFork _ _ _ bodies deflt) -> do
+            mapM_ (mapLPVMBodyM primFn argFn) bodies
+            maybe (return ()) (mapLPVMBodyM primFn argFn) deflt
+
+
+-- |Handle a single Prim for mapLPVMBodyM doing the needful.
+mapSinglePrimM :: Monad m => (Prim -> m ()) -> (PrimArg -> m ()) -> Prim -> m ()
+mapSinglePrimM primFn argFn prim = do
+    primFn prim
+    case prim of
+        PrimForeign _ _ _ args -> mapM_ (mapSinglePrimArgM primFn argFn) args
+        PrimCall _ _ _ args _  -> mapM_ (mapSinglePrimArgM primFn argFn) args
+        PrimHigher _ fn _ args -> do
+            mapSinglePrimArgM primFn argFn fn
+            mapM_ (mapSinglePrimArgM primFn argFn) args
+
+
+-- |Handle a single PrimArg for mapLPVMBodyM doing the needful.
+mapSinglePrimArgM :: Monad m => (Prim -> m ()) -> (PrimArg -> m ()) -> PrimArg
+                  -> m ()
+mapSinglePrimArgM primFn argFn arg = do
+    argFn arg
+    case arg of
+        ArgClosure _ args _ ->
+            mapM_ (mapSinglePrimArgM primFn argFn) args
+        _ -> return ()
 
 
 -- |Info about a proc call, including the ID, prototype, and an
@@ -2800,7 +2878,7 @@ data Constant = Int Int
 data ProcProto = ProcProto {
     procProtoName::ProcName,
     procProtoParams::[Placed Param],
-    procProtoResources::Set.Set ResourceFlowSpec
+    procProtoResources::[ResourceFlowSpec]
     } deriving (Eq, Generic)
 
 
@@ -2898,7 +2976,7 @@ data PrimParam = PrimParam {
 -- |Info inferred about a single proc parameter
 data ParamInfo = ParamInfo {
         paramInfoUnneeded :: Bool, -- ^Can this parameter be eliminated?
-        paramInfoGlobalFlows :: GlobalFlows 
+        paramInfoGlobalFlows :: GlobalFlows
     } deriving (Eq,Generic)
 
 -- |A dataflow direction:  in, out, both, or neither.
@@ -2915,8 +2993,14 @@ showFlowName ParamInOut = "in/output (!)"
 data PrimFlow =
     --  in or out
     FlowIn | FlowOut
-    -- Two "special" flows used to improve last-call optimization.
-    -- Users cannot (at present) manually refer to these flows
+    -- Two "special" flows used to improve last-call optimization. Users cannot
+    -- (at present) manually refer to these flows. FlowOutByReference denotes an
+    -- argument that is notionally an output, but is actually passed as an input
+    -- reference to the place to write the output.  FlowTakeReference is
+    -- notionally an input, but is actually passed as an output of a pointer to
+    -- the place to write the input when it becomes available.  These flows are
+    -- generated in the LastCallAnalysis module, and the transformation is
+    -- explained there.
     | FlowOutByReference | FlowTakeReference
                    deriving (Show,Eq,Ord,Generic)
 
@@ -3033,8 +3117,8 @@ data Stmt
 
      -- |A conditional; execute the first (SemiDet) Stmt; if it succeeds,
      --  execute the second Stmts, else execute the third.  The VarDicts hold
-     --  the variables generated by the condition, and the variables generated
-     --  both branches of the conditional, with their types.
+     --  the variables bound after the condition, and the variables bound after
+     --  the whole conditional (regardless of branch taken), with their types.
      | Cond (Placed Stmt) [Placed Stmt] [Placed Stmt]
             (Maybe VarDict) (Maybe VarDict) (Maybe (Set ResourceSpec))
 
@@ -3054,7 +3138,8 @@ data Stmt
      -- |A test that succeeds iff all of the enclosed tests succeed
      | And [Placed Stmt]
      -- |A test that succeeds iff any of the enclosed tests succeed; the VarDict
-     -- indicates the variables defined after all disjuncts
+     -- indicates the variables defined after all disjuncts.  Transformed into
+     -- a Cond during flattening.
      | Or [Placed Stmt] (Maybe VarDict) (Maybe (Set ResourceSpec))
      -- |A test that succeeds iff the enclosed test fails
      | Not (Placed Stmt)
@@ -3136,6 +3221,7 @@ data Exp
       | FloatValue Double
       | CharValue Char
       | StringValue String StringVariant
+      | FailExpr -- ^ an expression with no value, because it always fails
       | Var VarName FlowDirection ArgFlowType
       | Closure ProcSpec [Placed Exp]
       | Typed Exp TypeSpec (Maybe TypeSpec)
@@ -3144,7 +3230,7 @@ data Exp
                -- these two must be the same.
       | Global GlobalInfo
       -- The following are eliminated during flattening
-      | AnonProc ProcModifiers [Param] [Placed Stmt] (Maybe VarDict) (Maybe (Set ResourceFlowSpec))
+      | AnonProc ProcModifiers [Param] [Placed Stmt] (Maybe VarDict) (Maybe [ResourceFlowSpec])
       | AnonFunc (Placed Exp)
       | AnonParamVar (Maybe Integer) FlowDirection
       | Where [Placed Stmt] (Placed Exp)
@@ -3168,8 +3254,15 @@ data StringVariant = WybeString | CString
 
 -- Information about a global variable.
 -- A global variable is a variable that is available everywhere,
--- and can be access via an LPVM load instruction, or written to via an LPVM store
+-- and can be access via an LPVM load instruction, or written to via an LPVM
+-- store.  This is used to implement resources, or for other things represented
+-- as low level global constants or variables.  The latter case is used in
+-- manifest constant wybe strings, which are represented as a structure holding
+-- the string length and a pointer to a C-style string.  Eventually we want to
+-- use this for other cases of constant values appearing in Wybe code, such as a
+-- constant list.
 data GlobalInfo = GlobalResource { globalResourceSpec :: ResourceSpec }
+                | GlobalVariable { globalVarSpec :: Ident }
     deriving (Eq, Ord, Generic)
 
 
@@ -3191,6 +3284,7 @@ flattenedExpFlow AnonProc{}            = ParamIn
 flattenedExpFlow (Closure _ _)         = ParamIn
 flattenedExpFlow (Var _ flow _)        = flow
 flattenedExpFlow (AnonParamVar _ flow) = flow
+flattenedExpFlow FailExpr              = ParamIn
 flattenedExpFlow (Typed exp _ _)       = flattenedExpFlow exp
 flattenedExpFlow otherExp =
     shouldnt $ "Getting flow direction of unflattened exp " ++ show otherExp
@@ -3417,13 +3511,13 @@ primGlobalFlows varFlows prim = do
 -- |Return the GlobalFlows of a PrimArg, given the currently known GlobalFlows 
 -- of variables 
 argGlobalFlow :: Map PrimVarName GlobalFlows -> PrimArg -> Compiler GlobalFlows
-argGlobalFlow varFlows (ArgVar name ty _ _ _) 
+argGlobalFlow varFlows (ArgVar name ty _ _ _)
     = return $ Map.findWithDefault univGlobalFlows name varFlows
 argGlobalFlow varFlows (ArgClosure pspec args _) = do
-    params <- getPrimParams pspec 
+    params <- getPrimParams pspec
     let nArgs = length args
         (closedParams, freeParams) = List.splitAt nArgs params
-    if any (\(PrimParam _ ty flow _ _) -> 
+    if any (\(PrimParam _ ty flow _ _) ->
             isInputFlow flow && isResourcefulHigherOrder ty) freeParams
     then return univGlobalFlows
     else do
@@ -3434,17 +3528,17 @@ argGlobalFlow _ _ = return emptyGlobalFlows
 
 -- Get the corresponding GlobalFlows and Flows of the given PrimArgs
 argsGlobalFlows :: Map PrimVarName GlobalFlows -> [PrimArg] -> Compiler [(GlobalFlows, PrimFlow)]
-argsGlobalFlows varFlows 
+argsGlobalFlows varFlows
     = mapM (\a -> (, argFlowDirection a) <$> argGlobalFlow varFlows a)
 
 
 -- | Gather the effective GlobalFLows of a given set of GlobalGlows, 
 -- using the GlobalFlows of the arguments corresponding to each parameter
 effectiveGlobalFlows :: [(GlobalFlows, PrimFlow)] -> GlobalFlows -> GlobalFlows
-effectiveGlobalFlows argFlows primFlows@(GlobalFlows _ _ UniversalSet) 
+effectiveGlobalFlows argFlows primFlows@(GlobalFlows _ _ UniversalSet)
     = globalFlowsUnions $ primFlows{globalFlowsParams=emptyUnivSet}
                         : List.map fst (List.filter (isInputFlow . snd) argFlows)
-effectiveGlobalFlows argFlows primFlows@(GlobalFlows _ _ (FiniteSet ids)) 
+effectiveGlobalFlows argFlows primFlows@(GlobalFlows _ _ (FiniteSet ids))
     = globalFlowsUnions $ primFlows{globalFlowsParams=emptyUnivSet}
                         : List.map (fst . (argFlows !!)) (Set.toList ids)
 
@@ -3455,7 +3549,9 @@ argIsVar ArgVar{} = True
 argIsVar _ = False
 
 
--- | Test if a PrimArg is a compile-time constant.
+-- | Test if a PrimArg is a compile-time constant.  This can include a
+-- compile-time constant pointer to mutable memory, so it doesn't mean
+-- *recursively* constant.
 argIsConst :: PrimArg -> Bool
 argIsConst ArgVar{}            = False
 argIsConst ArgInt{}            = True
@@ -3463,9 +3559,24 @@ argIsConst ArgFloat{}          = True
 argIsConst ArgString{}         = True
 argIsConst ArgChar{}           = True
 argIsConst (ArgClosure _ as _) = all argIsConst as
-argIsConst ArgGlobal{}         = False
-argIsConst ArgUnneeded{}       = False
+argIsConst ArgGlobal{}         = True
+argIsConst ArgUnneeded{}       = True
 argIsConst ArgUndef{}          = False
+
+
+-- | Test if a PrimArg actually needs to be passed; ie, it is not a phantom type
+-- and is not unneeded.
+argIsReal :: PrimArg -> Compiler Bool
+argIsReal ArgVar{argVarType=ty} = not <$> typeIsPhantom ty
+argIsReal (ArgInt _ ty)         = not <$> typeIsPhantom ty -- 0 is a valid phantom constant
+argIsReal ArgFloat{}            = return True
+argIsReal ArgString{}           = return True
+argIsReal ArgChar{}             = return True
+argIsReal (ArgClosure _ as _)   = return True
+argIsReal (ArgGlobal _ ty)      = not <$> typeIsPhantom ty
+argIsReal ArgUnneeded{}         = return False
+argIsReal ArgUndef{}            = return True
+
 
 
 -- | Return Just the integer constant value if a PrimArg iff it is an integer
@@ -3597,12 +3708,14 @@ expToStmt (ForeignFn lang name flags args) =
     ForeignCall lang name flags args
 expToStmt (Var name ParamIn _) = ProcCall (First [] name Nothing) Det False []
 expToStmt (Var name ParamInOut _) = ProcCall (First [] name Nothing) Det True []
+expToStmt FailExpr = Fail
 expToStmt expr = shouldnt $ "non-Fncall expr " ++ show expr
 
 
 procCallToExp :: Stmt -> Exp
 procCallToExp (ProcCall (First maybeMod name Nothing) _ bang args) =
     Fncall maybeMod name bang args
+procCallToExp Fail = FailExpr
 procCallToExp stmt =
     shouldnt $ "converting non-proccall to expr " ++ showStmt 4 stmt
 
@@ -3624,6 +3737,7 @@ expOutputs (CharValue _) = Set.empty
 expOutputs (Var "_" ParamIn _) = Set.singleton "_" -- special _ variable is out
 expOutputs (Var name flow _) =
     if flowsOut flow then Set.singleton name else Set.empty
+expOutputs FailExpr = Set.empty
 expOutputs (AnonParamVar mbNum flow) =
     if flowsOut flow then Set.singleton ("@" ++ maybe "" show mbNum) else Set.empty
 expOutputs (Global _) = Set.empty
@@ -3655,6 +3769,7 @@ expInputs (CharValue _) = Set.empty
 expInputs (Var "_" ParamIn _) = Set.empty
 expInputs (Var name flow _) =
     if flowsIn flow then Set.singleton name else Set.empty
+expInputs FailExpr = Set.empty
 expInputs (AnonParamVar mbNum flow) =
     if flowsIn flow then Set.singleton (show mbNum) else Set.empty
 expInputs (Global _) = Set.empty
@@ -3713,7 +3828,8 @@ varsInPrims dir =
     List.foldr (Set.union . (varsInPrim dir)) Set.empty
 
 varsInPrim :: PrimFlow -> Prim     -> Set PrimVarName
-varsInPrim dir prim      = let (args, globals) = primArgs prim in varsInPrimArgs dir args
+varsInPrim dir prim      = let (args, globals) = primArgs prim
+                           in varsInPrimArgs dir args
 
 varsInPrimArgs :: PrimFlow -> [PrimArg] -> Set PrimVarName
 varsInPrimArgs dir =
@@ -3728,29 +3844,12 @@ varsInPrimArg _ ArgInt{}      = Set.empty
 varsInPrimArg _ ArgFloat{}    = Set.empty
 varsInPrimArg _ ArgString{}   = Set.empty
 varsInPrimArg _ ArgChar{}     = Set.empty
-varsInPrimArg _ ArgGlobal{} = Set.empty
+varsInPrimArg _ ArgGlobal{}   = Set.empty
 varsInPrimArg _ ArgUnneeded{} = Set.empty
 varsInPrimArg _ ArgUndef{}    = Set.empty
 
 ----------------------------------------------------------------
 --                       Generating Symbols
-
--- | The character we include in every generated identifier to prevent capturing
--- a user identifier.  It should not be possible for the user to include this
--- character in an identifier.
-specialChar :: Char
-specialChar = '#' -- note # is not allowed in backquoted strings
-
-
--- | Construct a name can't be a valid Wybe symbol from one user string.
-specialName :: String -> String
-specialName = (specialChar:)
-
-
--- | Construct a name that can't be a valid Wybe symbol from two user strings.
-specialName2 :: String -> String -> String
-specialName2 front back = front ++ specialChar:back
-
 
 -- | The full name to give to a PrimVarName, including the variable number
 -- suffix.  Use two specialChars to distinguish from special separator.
@@ -3906,7 +4005,7 @@ instance Show Item where
     ++ show typeModifiers
     ++ showOptPos pos ++ "\n    "
     ++ visibilityPrefix vis ++ "constructors "
-    ++ intercalate "\n  | " 
+    ++ intercalate "\n  | "
         (List.map (\(vis, ctor) -> visibilityPrefix vis ++ show ctor) ctors)
     ++ concatMap (("\n  "++) . show) items
     ++ "\n}\n"
@@ -3957,7 +4056,14 @@ instance Show Item where
     ++ showOptPos pos
     ++ " {"
     ++ showBody 4 stmts
-    ++ "\n  }"
+    ++ "\n  }"  
+  show (ForeignProcDecl vis lang modifiers proto pos) =
+    visibilityPrefix vis
+    ++ "def foreign "
+    ++ lang ++ " "
+    ++ showProcModifiers' modifiers
+    ++ show proto
+    ++ showOptPos pos
   show (EntityDecl vis entityProto entityModifiers pos) =
     visibilityPrefix vis
     ++ show entityProto
@@ -3971,13 +4077,14 @@ instance Show Item where
 
 -- |How to show a type representation
 instance Show TypeRepresentation where
-  show Address = "address"
+  show Pointer = "pointer"
   show (Bits bits) = show bits ++ " bit unsigned"
   show (Signed bits) = show bits ++ " bit signed"
   show (Floating bits) = show bits ++ " bit float"
   show (Func ins outs) =
       "function {" ++ intercalate ", " (List.map show outs) ++ "}"
       ++ "(" ++ intercalate ", " (List.map show ins) ++ ")"
+  show CPointer = "opaque"
 
 
 -- |How to show a type family
@@ -3988,6 +4095,7 @@ instance Show TypeFamily where
 
 -- |How to show a ModSpec.
 showModSpec :: ModSpec -> String
+showModSpec [] = "*main* module"
 showModSpec spec = intercalate "." $ (\case "" -> "``" ; m -> m) <$> spec
 
 
@@ -4089,7 +4197,8 @@ showProcDefs firstID (def:defs) =
 -- |How to show a proc definition.
 showProcDef :: Int -> ProcDef -> String
 showProcDef thisID
-  procdef@(ProcDef n proto def pos _ _ _ vis detism inline impurity ctor sub _) =
+  procdef@(ProcDef n proto def pos tmpCount _ _ vis detism inline impurity ctor
+                   sub _) =
     "\n"
     ++ showProcName n ++ " > "
     ++ visibilityPrefix vis
@@ -4129,11 +4238,10 @@ instance Show TypeSpec where
 
 
 -- |Show the use declaration for a set of resources, if it's non-empty.
-showResources :: Set.Set ResourceFlowSpec -> String
+showResources :: [ResourceFlowSpec] -> String
 showResources resources
-  | Set.null resources = ""
-  | otherwise          = " use " ++ intercalate ", "
-                                    (List.map show $ Set.elems resources)
+  | List.null resources = ""
+  | otherwise           = " use " ++ intercalate ", " (List.map show resources)
 
 
 -- |How to show a proc prototype.
@@ -4349,6 +4457,7 @@ instance Show Exp where
   show (StringValue s v) = show v ++ show s
   show (CharValue c) = show c
   show (Var name dir flowtype) = show flowtype ++ flowPrefix dir ++ name
+  show FailExpr = "fail"
   show (Global info) = show info
   show (AnonProc mods params ss _ _) =
       showProcModifiers mods
@@ -4383,7 +4492,7 @@ instance Show StringVariant where
 
 instance Show GlobalInfo where
     show (GlobalResource res) = "<<" ++ show res ++ ">>"
-
+    show (GlobalVariable res) = "@" ++ res
 
 
 showMap :: String -> String -> String -> (k->String) -> (v->String)
@@ -4426,6 +4535,12 @@ maybeShow pre (Just something) post =
 -- |Report an internal error and abort.
 shouldnt :: String -> a
 shouldnt what = error $ "Internal error: " ++ what
+
+
+-- |Report an internal error and abort unless the test succeeds.
+should :: String -> Bool -> ()
+should _    True  = ()
+should what False = shouldnt what
 
 
 -- |Report that some feature is not yet implemented and abort.
@@ -4513,7 +4628,7 @@ showMessages :: Compiler ()
 showMessages = do
     opts <- gets options
     let verbose = optVerbose opts
-    let noFonts = optNoFont opts 
+    let noFonts = optNoFont opts
     messages <- reverse <$> gets msgs -- messages are collected in reverse order
     let filtered =
             if verbose
@@ -4527,7 +4642,7 @@ showMessage :: Bool -> Message -> IO ()
 showMessage noFont (Message lvl pos msg) = do
     posMsg <- makeMessage pos msg
     let showMsg colour msg =
-            if noFont 
+            if noFont
                 then putStrLn msg
                 else do
                     setSGR [SetColor Foreground Vivid colour]

@@ -11,15 +11,15 @@ module ASTShow (
 
 import AST
 import Options (optDumpLib, LogSelection)
+import UnivSet (showSet)
 import Data.List as List
 import Data.Set  as Set
 import Data.Map  as Map
 import Data.Maybe
--- import Control.Monad
+import Control.Monad
 import Control.Monad.Trans (lift,liftIO)
 import Control.Monad.Trans.State
 import System.IO
-import LLVM.Pretty (ppllvm)
 import qualified Data.Text.Lazy as TL
 
 
@@ -41,7 +41,7 @@ instance Show Module where
            "\n  public submods  : " ++
            showMap "" "\n                    " "" (++ " -> ")
                    showModSpec (pubSubmods int) ++
-           "\n  public resources: " ++ showMapLines (pubResources int) ++
+           "\n  public resources: " ++ showMapLines show (pubResources int) ++
            "\n  public procs    : " ++
            intercalate "\n                    "
            (List.map show $ Set.toList $ Set.unions $
@@ -53,29 +53,25 @@ instance Show Module where
                  intercalate "\n                    "
                  [showUse 20 mod dep |
                   (mod,(dep,_)) <- Map.assocs $ modImports impl] ++
-                 "\n  resources       : " ++ showMapLines (modResources impl) ++
+                 -- Keep this around in case it's needed again:
+                --  "\n  types           : " ++
+                --  showMapLines (showSet showModSpec) (modKnownTypes impl) ++
+                 "\n  resources       : " ++
+                 showMapLines show (modResources impl) ++
                  (if Map.null (modSubmods impl)
                   then ""
                   else "\n  submodules      : " ++
                        showMap "" ", " "" (const "") showModSpec
                        (modSubmods impl)) ++
                  "\n  procs           : " ++ "\n" ++
-                 (showMap "" "\n\n" "" (const "") (showProcDefs 0)
-                  (modProcs impl)) ++
-                 (maybe "\n\nLLVM code       : None\n"
-                  (("\n\n  LLVM code       :\n\n" ++) . TL.unpack . ppllvm)
-                  $ modLLVM impl)
+                 showMap "" "\n\n" "" (const "") (showProcDefs 0)
+                  (modProcs impl) ++
+                  ""
 
 
 -- |How to show a map, one line per item.
-showMapLines :: Show v => Map Ident v -> String
-showMapLines = showMap "" "\n                    " "" (++": ") show
-
-showSetMapItems :: (Show b, Ord b) => (Map a (Set b)) -> String
-showSetMapItems setMap =
-    intercalate ", " $
-    List.map show $ Set.toList $
-    List.foldr Set.union Set.empty $ Map.elems setMap
+showMapLines :: (v -> String) -> Map Ident v -> String
+showMapLines = showMap "" "\n                    " "" (++": ")
 
 
 -- |How to show a map to source positions, one line per item.
@@ -87,25 +83,25 @@ showMapPoses = showMap "" ", " "" id showOptPos
 -- of the specified log selectors have been selected for logging.  This
 -- is called between the passes of those two selectors.
 logDump :: LogSelection -> LogSelection -> String -> Compiler ()
-logDump = logDumpWith (const $ return Nothing)
+logDump = logDumpWith (\_ _ _ _ -> return ())
 
 
--- |Dump the content of the specified module and all submodules, with the
--- result of an optional action applied to each module if either of the
--- specified log selectors have been selected for logging.  This is called
--- between the passes of those two selectors.
-logDumpWith :: (Module -> Compiler (Maybe String))
+-- |Dump the content of the specified module and all submodules, using the
+-- specified LLVM printer to emit the LLVM code, if either of the specified log
+-- selectors have been selected for logging.  This is called between the passes
+-- of those two selectors.
+logDumpWith :: (Handle -> ModSpec -> Bool -> Bool -> Compiler ())
             -> LogSelection -> LogSelection -> String -> Compiler ()
-logDumpWith action selector1 selector2 pass =
+logDumpWith llPrinter selector1 selector2 pass =
     whenLogging2 selector1 selector2 $ do
         modList <- gets (Map.elems . modules)
         dumpLib <- gets (optDumpLib . options)
         let toLog mod = let spec  = modSpec mod
                         in  List.null spec || dumpLib || head spec /= "wybe"
         let logging = List.filter toLog modList
-        mbStrs <- mapM action logging
         liftIO $ hPutStrLn stderr $ replicate 70 '='
-          ++ "\nAFTER " ++ pass ++ ":\n"
-          ++ intercalate ("\n" ++ replicate 50 '-' ++ "\n")
-          (zipWith (\mod mbStr -> show mod ++ maybe "" ("\n\n" ++) mbStr)
-              logging mbStrs)
+                    ++ "\nAFTER " ++ pass ++ ":\n"
+        forM_ logging $ \mod -> do
+                liftIO $ hPutStrLn stderr $ "\n" ++ replicate 50 '-' ++ "\n"
+                        ++ show mod ++ "\n\n  LLVM code       :\n"
+                llPrinter stderr (modSpec mod) False False

@@ -15,7 +15,7 @@ module Normalise (normalise, normaliseItem, completeNormalisation) where
 
 import AST
 import Config (wordSize, wordSizeBytes, availableTagBits,
-               tagMask, smallestAllocatedAddress, currentModuleAlias)
+               tagMask, smallestAllocatedAddress, currentModuleAlias, specialName2, specialName, initProcName, specialChar)
 import Control.Monad
 import Control.Monad.State (gets)
 import Control.Monad.Trans (lift,liftIO)
@@ -24,7 +24,7 @@ import Data.List as List
 import Data.Map as Map
 import Data.Maybe
 import Data.Set as Set
-import Data.Bits
+import Data.Bits (complement, bit, shiftL)
 import Data.Graph
 import Data.Tuple.HT
 import Data.Tuple.Select
@@ -58,15 +58,18 @@ normalise items = do
 normaliseItem :: Item -> Compiler ()
 normaliseItem (TypeDecl vis (TypeProto name params) mods
               (TypeRepresentation rep) items pos) = do
+    validateModuleName "type" pos name
     let items' = RepresentationDecl params mods rep pos : items
     unless (List.null params)
       $ errmsg pos "types defined by representation cannot have type parameters"
     normaliseSubmodule name vis pos items'
 normaliseItem (TypeDecl vis (TypeProto name params) mods
               (TypeCtors ctorVis ctors) items pos) = do
+    validateModuleName "type" pos name
     let items' = ConstructorDecl ctorVis params mods ctors pos : items
     normaliseSubmodule name vis pos items'
-normaliseItem (ModuleDecl vis name items pos) =
+normaliseItem (ModuleDecl vis name items pos) = do
+    validateModuleName "module" pos name
     normaliseSubmodule name vis pos items
 normaliseItem (RepresentationDecl params mods rep pos) = do
     updateTypeModifiers mods
@@ -79,19 +82,18 @@ normaliseItem (ConstructorDecl vis params mods ctors pos) = do
         Public -> mapM_ (addConstructor Public . snd) ctors
         Private -> mapM_ (uncurry addConstructor) ctors
 normaliseItem (ImportMods vis modspecs pos) =
-    mapM_ (\spec -> addImport spec (importSpec Nothing vis)) modspecs
+    mapM_ (\spec -> validateModSpec pos spec >>
+        addImport spec (importSpec Nothing vis)
+    ) modspecs
 normaliseItem (ImportItems vis modspec imports pos) =
-    addImport modspec (importSpec (Just imports) vis)
+    validateModSpec pos modspec
+     >> addImport modspec (importSpec (Just imports) vis)
 normaliseItem (ImportForeign files _) =
     mapM_ addForeignImport files
 normaliseItem (ImportForeignLib files _) =
     mapM_ addForeignLib files
 normaliseItem (ResourceDecl vis name typ init pos) = do
   addSimpleResource name (SimpleResource typ init pos) vis
-  case init of
-    Nothing  -> return ()
-    Just val -> normaliseItem (StmtDecl (ProcCall (regularProc "=") Det False
-                                         [varSet name `maybePlace` pos, val]) pos)
 normaliseItem (FuncDecl vis mods (ProcProto name params resources) resulttype
     (Placed (Where body (Placed (Var var ParamOut rflow) _)) _) pos) =
     -- Handle special reverse mode case of def foo(...) = var where ....
@@ -112,6 +114,28 @@ normaliseItem (FuncDecl vis mods (ProcProto name params resources)
                  [result, varSet outputVariableName `maybePlace` pos])
               pos]
         pos)
+normaliseItem (ForeignProcDecl vis lang mods proto@(ProcProto name params resources) pos) = do
+    when (mods{modifierImpurity=Pure, modifierDetism=Det, modifierInline=MayInline} /= defaultProcModifiers)
+        $ errmsg pos
+        $ "Foreign procedure declaration of " ++ name
+            ++ " has illegal procedure modifiers. Only purity, determinism, and inlining can be specified."
+    mapM_ ((\(Param{paramType=ty, paramName=name}, pos) -> do
+            when (ty == AnyType)
+                $ errmsg pos
+                $ "Foreign procedure declaration parameters must be typed, but " ++ name ++ " is untyped."
+        ) . unPlace) params
+
+    normaliseItem
+        (ProcDecl vis mods proto
+            [maybePlace (ForeignCall lang name mods' exps) pos] pos)
+  where
+    mods' = List.filter (not . List.null) 
+                [ impurityName (modifierImpurity mods)
+                , determinismName (modifierDetism mods) ]
+    exps = List.map (uncurry (flip rePlace . paramToVar) . unPlace) params
+        ++ List.map (\(ResourceFlowSpec rs@(ResourceSpec _ r) dir) ->
+                        Var r dir (Resource rs) `maybePlace` pos)
+                    resources
 normaliseItem item@ProcDecl{} = do
     logNormalise $ "Recording proc without flattening:" ++ show item
     addProc 0 item
@@ -220,7 +244,7 @@ completeNormalisation :: [ModSpec] -> Compiler ()
 completeNormalisation modSCC = do
     logNormalise $ "Completing normalisation of modules " ++ showModSpecs modSCC
     completeTypeNormalisation modSCC
-    mapM_ (normaliseModMain `inModule`) modSCC
+    mapM_ (normaliseModMain modSCC `inModule`) modSCC
     mapM_ (transformModuleProcs flattenProcBody) modSCC
 
 
@@ -345,8 +369,20 @@ completeTypeSCC (CyclicSCC modTypeDefs) = do
              logNormalise $ "   " ++ showModSpec mod ++ " = " ++ show typedef)
           modTypeDefs
     -- First set representations to addresses, then layout types
-    mapM_ ((setTypeRep Address `inModule`) . fst) modTypeDefs
+    mapM_ ((setTypeRep Pointer `inModule`) . fst) modTypeDefs
     mapM_ (uncurry completeType) modTypeDefs
+
+
+-- |Check that the specified module name is valid, reporting and error if not.
+validateModuleName :: String -> OptPos -> Ident -> Compiler ()
+validateModuleName what pos name =
+    unless (validModuleName name)
+     $ errmsg pos $ "invalid character in " ++ what ++ " name `" ++ name ++ "`"
+
+
+-- |Check that the specified module name is valid, reporting and error if not.
+validateModSpec :: OptPos -> ModSpec -> Compiler ()
+validateModSpec pos = mapM_ (validateModuleName "module" pos)
 
 
 -- | Information about a non-constant constructor
@@ -476,7 +512,7 @@ nonConstCtorInfo (vis, placedProto) tag = do
     logNormalise $ "Analysing non-constant ctor "
                    ++ show tag ++ ": " ++ show placedProto
     let (proto,pos) = unPlace placedProto
-    unless (Set.null $ procProtoResources proto)
+    unless (List.null $ procProtoResources proto)
       $ shouldnt $ "Constructor with resources: " ++ show placedProto
     let name   = procProtoName proto
     let params = procProtoParams proto
@@ -510,14 +546,23 @@ typeRepresentation :: [TypeRepresentation] -> Int -> TypeRepresentation
 typeRepresentation [] numConsts =
     Bits $ ceiling $ logBase 2 $ fromIntegral numConsts
 typeRepresentation [rep] 0      = rep
-typeRepresentation _ _          = Address
+typeRepresentation _ _          = Pointer
 
 
 ----------------------------------------------------------------
--- Generating top-level code for the current module
+-- Generating top-level code for the current module, given a list of all the
+-- modules in the same module dependency SCC.  This produces a proc with an
+-- empty proc name, which executes all the top-level code in the module.  This
+-- assumes that all resources in this modules and its dependencies (including
+-- mutual dependencies) have been initialised; therefore this proc considers all
+-- visible resources as both inputs and outputs.  The main executable proc will
+-- call this proc after initialising all initialised resources visible to this
+-- module.  The benefit of this approach is that it handles initialised resouces
+-- in mutually dependendent modules; note that modules are mutually dependent
+-- with their submodules.
 
-normaliseModMain :: Compiler ()
-normaliseModMain = do
+normaliseModMain :: [ModSpec] -> Compiler ()
+normaliseModMain modSCC = do
     stmts <- getModule stmtDecls
     modSpec <- getModuleSpec
     logNormalise $ "Completing main normalisation of module "
@@ -525,34 +570,29 @@ normaliseModMain = do
     let initBody = List.reverse stmts
     logNormalise $ "Top-level statements = " ++ show initBody
     unless (List.null stmts) $ do
-        resources <- initResources
+        resources <- initResources modSCC
         logNormalise $ "Initialised resources in main code for module "
                         ++ showModSpec modSpec
                         ++ ": " ++ show resources
         normaliseItem $ ProcDecl Public (setImpurity Semipure defaultProcModifiers)
-                        (ProcProto "" [] resources) initBody Nothing
+                        (ProcProto initProcName [] resources) initBody Nothing
 
 
--- |The resources available at the top level of this module, plus the
--- initialisations to be performed before executing any code that uses this
--- module.
-initResources :: Compiler (Set ResourceFlowSpec)
-initResources = do
+-- |The resource flows for the initialisation code of the current module.  This
+-- assumes that all resource initialisations have already been completed, and
+-- all are permitted to be modified by the initialisation code, so all
+-- visible initialised resources flow both in and out.
+initResources :: [ModSpec] -> Compiler [ResourceFlowSpec]
+initResources modSCC = do
     thisMod <- getModule modSpec
     mods <- getModuleImplementationField (Map.keys . modImports)
     mods' <- (mods ++) . concat <$> mapM descendentModules mods
     logNormalise $ "in initResources for module " ++ showModSpec thisMod
                    ++ ", mods = " ++ showModSpecs mods'
-    (localInitialised,visibleInitialised) <- initialisedResources
+    visibleInitialised <- initialisedVisibleResources
     let visibleInitSet = Map.keysSet visibleInitialised
-    let localInitSet = Map.keysSet localInitialised
-    let importedInitSet = visibleInitSet Set.\\ localInitSet
     logNormalise $ "in initResources, initialised resources = "
                    ++ show visibleInitSet
-    logNormalise $ "            initialised local resources = "
-                   ++ show visibleInitSet
-    logNormalise $ "         initialised imported resources = "
-                   ++ show importedInitSet
     -- Direct tie-in to command_line library module:  for the command_line
     -- module, or any module that imports it, we add argc and argv as resources.
     -- This is necessary because argc and argv are effectively initialised by
@@ -561,28 +601,16 @@ initResources = do
     -- because that would overwrite them.
     let cmdlineResources =
             if cmdLineModSpec == thisMod
-            then let cmdline = ResourceSpec cmdLineModSpec 
+            then let cmdline = ResourceSpec cmdLineModSpec
                  in [ResourceFlowSpec (cmdline "argc") ParamInOut
                     ,ResourceFlowSpec (cmdline "argv") ParamInOut]
             else []
     let resources = cmdlineResources
                     ++ ((`ResourceFlowSpec` ParamInOut)
-                         <$> Set.toList importedInitSet)
-                    ++ ((`ResourceFlowSpec` ParamOut)
-                        <$> Set.toList localInitSet)
-    -- let inits = [ForeignCall "llvm" "move" []
-    --                 [maybePlace ((content initExp) `withType` resType)
-    --                     (place initExp)
-    --                 , varSet (resourceName resSpec) `maybePlace` pos] 
-    --                  `maybePlace` pos
-    --             | (resSpec, resImpln) <- localInitSet
-    --             , let initExp = trustFromJust "initResources"
-    --                             $ resourceInit resImpln
-    --             , let resType = resourceType resImpln]
+                         <$> Set.toList visibleInitSet)
     logNormalise $ "In initResources for module " ++ showModSpec thisMod
                    ++ ", resources = " ++ show resources
-    -- logNormalise $ "In initResources, initialisations =" ++ showBody 4 inits
-    return (Set.fromList resources)
+    return resources
 
 
 
@@ -622,7 +650,7 @@ constCtorItems typeSpec ((vis, placedProto), num) =
         constName = procProtoName proto
     in [ProcDecl vis (inlineModifiers (ConstructorProc constName) Det)
         (ProcProto constName
-            [Param outputVariableName typeSpec ParamOut Ordinary `maybePlace` pos] Set.empty)
+            [Param outputVariableName typeSpec ParamOut Ordinary `maybePlace` pos] [])
         [lpvmCastToVar (castTo (iVal num) typeSpec) outputVariableName] pos
        ]
 
@@ -674,12 +702,12 @@ nonConstCtorItems uniq typeSpec numConsts numNonConsts tagBits tagLimit
         let (fields,size) = layoutRecord paramInfos tag tagLimit
         logNormalise $ "Laid out structure size " ++ show size
             ++ ": " ++ show fields
-        let ptrCount = length $ List.filter ((==Address) . paramInfoTypeRep) paramInfos
+        let ptrCount = length $ List.filter ((==Pointer) . paramInfoTypeRep) paramInfos
         logNormalise $ "Structure contains " ++ show ptrCount ++ " pointers, "
                         ++ show numConsts ++ " const constructors, "
                         ++ show numNonConsts ++ " non-const constructors"
         let params = paramInfoParam <$> paramInfos
-        return (Address,
+        return (Pointer,
                 constructorItems vis ctorName typeSpec params fields
                     size tag tagLimit pos
                 ++ deconstructorItems uniq vis ctorName typeSpec params numConsts
@@ -736,7 +764,7 @@ constructorItems vis ctorName typeSpec params fields size tag tagLimit pos =
         (ProcProto ctorName
             ((placedApply (\p -> maybePlace p {paramFlow=ParamIn, paramFlowType=Ordinary}) <$> params)
              ++ [Param outputVariableName typeSpec ParamOut Ordinary `maybePlace` pos])
-            Set.empty)
+            [])
         -- Code to allocate memory for the value
         ([maybePlace (ForeignCall "lpvm" "alloc" []
           [Unplaced $ iVal size,
@@ -786,7 +814,7 @@ deconstructorItems uniq vis ctorName typeSpec params numConsts numNonConsts tag
         (ProcProto ctorName
          ((contentApply (\p -> p {paramFlow=ParamOut, paramFlowType=Ordinary}) <$> params)
           ++ [Param outputVariableName typeSpec ParamIn Ordinary `maybePlace` pos])
-         Set.empty)
+         [])
         -- Code to check we have the right constructor
         (tagCheck pos numConsts numNonConsts tag tagBits tagLimit
             (Just size) outputVariableName
@@ -857,9 +885,9 @@ boxedGetterSetterStmts vis rectype numConsts numNonConsts ptrCount size
     let startOffset = if tag > tagLimit then tagLimit+1 else tag
         detism = deconstructorDetism numConsts numNonConsts
         -- Set the "noalias" flag when all other fields (exclude the one
-        -- that is being changed) in this struct aren't [Address].
+        -- that is being changed) in this struct aren't [Pointer].
         -- This flag is used in [AliasAnalysis.hs]
-        otherPtrCount = if rep == Address then ptrCount-1 else ptrCount
+        otherPtrCount = if rep == Pointer then ptrCount-1 else ptrCount
         flags = ["noalias" | otherPtrCount == 0]
     in [( field
         , GetterSetterInfo pos vis fieldtype
@@ -894,7 +922,7 @@ unboxedConstructorItems vis ctorName typeSpec tag nonConstBit fields pos =
                 ([Param name paramType ParamIn Ordinary `maybePlace` pPos
                  | FieldInfo name pPos _ paramType _ _ _ <- fields]
                   ++ [Param outputVariableName typeSpec ParamOut Ordinary `maybePlace` pos])
-                Set.empty
+                []
     in [ProcDecl vis (inlineModifiers (ConstructorProc ctorName) Det) proto
          -- Initialise result to 0
         ([ForeignCall "llvm" "move" []
@@ -905,8 +933,11 @@ unboxedConstructorItems vis ctorName typeSpec tag nonConstBit fields pos =
          -- Shift each field into place and or with the result
          List.concatMap
           (\(FieldInfo var pPos _ ty _ shift sz) ->
-               [maybePlace (ForeignCall "llvm" "shl" []
-                 [castFromTo ty typeSpec (varGet var) `maybePlace` pPos,
+               [maybePlace (ForeignCall "lpvm" "cast" []
+                 [varGetTyped var ty `maybePlace` pPos,
+                  varSetTyped tmpName1 typeSpec `maybePlace` pos]) pos,
+                maybePlace (ForeignCall "llvm" "shl" []
+                 [varGetTyped tmpName1 typeSpec `maybePlace` pPos,
                   iVal shift `castTo` typeSpec `maybePlace` pos,
                   varSetTyped tmpName1 typeSpec `maybePlace` pos]) pos,
                 maybePlace (ForeignCall "llvm" "or" []
@@ -947,7 +978,7 @@ unboxedDeconstructorItems vis uniq ctorName recType numConsts numNonConsts tag
          (List.map (\(FieldInfo n pPos _ fieldType _ _ _) -> Param n fieldType ParamOut Ordinary `maybePlace` pPos)
           fields
           ++ [Param outputVariableName recType ParamIn Ordinary `maybePlace` pos])
-         Set.empty)
+         [])
          -- Code to check we have the right constructor
         (tagCheck pos numConsts numNonConsts tag tagBits (wordSizeBytes-1) Nothing
           outputVariableName
@@ -984,32 +1015,35 @@ unboxedGetterSetterStmts vis recType numConsts numNonConsts tag tagBits
     in [ ( field
          , GetterSetterInfo pos vis fieldType
            (tagCheck pos numConsts numNonConsts tag tagBits (wordSizeBytes-1) Nothing recName)
-           [maybePlace (ForeignCall "llvm" "lshr" [] -- The getter:
-                [varGetTyped recName recType `maybePlace` pos,
-                    iVal shift `withType` recType `maybePlace` pos,
-                    varSetTyped recName recType `maybePlace` pos]) pos,
-                -- XXX Don't need to do this for the most significant field:
-                maybePlace (ForeignCall "llvm" "and" []
-                [varGetTyped recName recType `maybePlace` pos,
-                    iVal fieldMask `withType` recType `maybePlace` pos,
-                    varSetTyped fieldName recType `maybePlace` pos]) pos,
-                maybePlace (ForeignCall "lpvm" "cast" []
-                [varGetTyped fieldName recType `maybePlace` pos,
-                    varSetTyped outputVariableName fieldType `maybePlace` pos]) pos
-                ]
-            [maybePlace (ForeignCall "llvm" "and" []
-                [varGetTyped recName recType `maybePlace` pos,
-                    iVal shiftedHoleMask `withType` recType `maybePlace` pos,
-                    varSetTyped recName recType `maybePlace` pos]) pos,
-                maybePlace (ForeignCall "llvm" "shl" []
-                [castFromTo fieldType recType (varGet fieldName) `maybePlace` pos,
-                    iVal shift `castTo` recType `maybePlace` pos,
-                    varSetTyped tmpName1 recType `maybePlace` pos]) pos,
-                maybePlace (ForeignCall "llvm" "or" []
-                [varGetTyped tmpName1 recType `maybePlace` pos,
-                    varGetTyped recName recType `maybePlace` pos,
-                    varSetTyped recName recType `maybePlace` pos]) pos
-                ]
+           [ForeignCall "llvm" "lshr" [] -- The getter:
+               [varGetTyped recName recType `maybePlace` pos,
+                iVal shift `withType` recType `maybePlace` pos,
+                varSetTyped recName recType `maybePlace` pos] `maybePlace` pos,
+            -- XXX Don't need to do this for the most significant field:
+            ForeignCall "llvm" "and" []
+               [varGetTyped recName recType `maybePlace` pos,
+                iVal fieldMask `withType` recType `maybePlace` pos,
+                varSetTyped fieldName recType `maybePlace` pos] `maybePlace` pos,
+            ForeignCall "lpvm" "cast" []
+               [varGetTyped fieldName recType `maybePlace` pos,
+                varSetTyped outputVariableName fieldType `maybePlace` pos] `maybePlace` pos
+            ]
+           [ForeignCall "llvm" "and" []
+               [varGetTyped recName recType `maybePlace` pos,
+                iVal shiftedHoleMask `withType` recType `maybePlace` pos,
+                varSetTyped recName recType `maybePlace` pos] `maybePlace` pos,
+            ForeignCall "lpvm" "cast" []
+               [varGetTyped fieldName fieldType `maybePlace` pos,
+                varSetTyped tmpName1 recType `maybePlace` pos] `maybePlace` pos,
+            ForeignCall "llvm" "shl" []
+               [varGetTyped tmpName1 recType `maybePlace` pos,
+                iVal shift `castTo` recType `maybePlace` pos,
+                varSetTyped tmpName1 recType `maybePlace` pos] `maybePlace` pos,
+            ForeignCall "llvm" "or" []
+               [varGetTyped tmpName1 recType `maybePlace` pos,
+                varGetTyped recName recType `maybePlace` pos,
+                varSetTyped recName recType `maybePlace` pos] `maybePlace` pos
+            ]
             )]
 
 
@@ -1049,13 +1083,13 @@ getterSetterItems numConsts numNonConsts recType field infos = do
         [-- The getter:
         ProcDecl fieldVis (setInline inline $ inlineModifiers (GetterProc field fieldType) detism)
         (ProcProto field [Param recName recType ParamIn Ordinary `maybePlace` pos,
-                          Param outputVariableName fieldType ParamOut Ordinary `maybePlace` pos] Set.empty)
+                          Param outputVariableName fieldType ParamOut Ordinary `maybePlace` pos] [])
         getBody
         pos,
         -- The setter:
         ProcDecl fieldVis (setInline inline $ inlineModifiers (SetterProc field fieldType) detism)
         (ProcProto field [Param recName recType ParamInOut Ordinary `maybePlace` pos,
-                          Param fieldName fieldType ParamIn Ordinary `maybePlace` pos] Set.empty)
+                          Param fieldName fieldType ParamIn Ordinary `maybePlace` pos] [])
         setBody
         pos]
 
@@ -1092,7 +1126,7 @@ implicitEquality pos typespec consts nonconsts rep = do
     else do
       let eqProto = ProcProto "=" [Param leftName typespec ParamIn Ordinary `maybePlace` pos,
                                    Param rightName typespec ParamIn Ordinary `maybePlace` pos]
-                    Set.empty
+                    []
       let (body,inline) = equalityBody pos consts nonconsts rep
       return [ProcDecl Public (setInline inline
                                $ setDetism SemiDet defaultProcModifiers)
@@ -1108,7 +1142,7 @@ implicitDisequality pos typespec consts nonconsts _ = do
     else do
       let neProto = ProcProto "~=" [Param leftName typespec ParamIn Ordinary `maybePlace` pos,
                                      Param rightName typespec ParamIn Ordinary `maybePlace` pos]
-                    Set.empty
+                    []
       let neBody = [maybePlace (Not $
                         ProcCall (First [] "=" Nothing) SemiDet False
                             [varGetTyped leftName typespec `maybePlace` pos,
@@ -1263,7 +1297,7 @@ entityItems typeSpec info@(CtorInfo entityName paramInfos vis pos 0 bits) modDic
         itemsList = getLastEtyResItem:getKeyResItems ++ getIndexResItems
                         ++ createItem:getItems ++ setItems
 
-    return (Address, itemsList)
+    return (Pointer, itemsList)
 
 entityItems typeSpec (CtorInfo entityName paramInfos vis pos _ bits) _ =
     nyi "nyi: entity with multiple constructors"
@@ -1278,7 +1312,7 @@ entityPtrParamInfo etyName typeSpec indexNames =
         ptrParamInfo name =
             CtorParamInfo
                 (Unplaced $ Param name typeSpec ParamIn Ordinary)
-                False Address wordSize
+                False Pointer wordSize
 
 ----------------------------------------------------------------
 --              Entity Items (Proc Declarations)
@@ -1289,7 +1323,7 @@ entityGetResourceItem vis typeSpec pos resSpec =
     ProcDecl vis (inlineModifiers (GetterProc procName typeSpec) Det)
         (ProcProto procName
             [Unplaced $ Param outputVariableName typeSpec ParamOut Ordinary]
-            $ Set.singleton $ ResourceFlowSpec resSpec ParamIn)
+            [ResourceFlowSpec resSpec ParamIn])
         [move (varGet resName) $ varSet outputVariableName]
         pos
     where
@@ -1302,7 +1336,7 @@ entityCreateItem :: Visibility -> ProcName -> TypeSpec -> [Placed Param]
                     -> Item
 entityCreateItem vis entityName typeSpec params fields size pos keyNames =
     ProcDecl vis (setInline NoInline $ inlineModifiers (ConstructorProc procName) Det)
-        (ProcProto procName protoParams resSet)
+        (ProcProto procName protoParams resList')
         (initEtyStmt:lookupStmts
             ++ [Unplaced
                 $ Cond testEtyLookupStmt createStmts []
@@ -1346,7 +1380,6 @@ entityCreateItem vis entityName typeSpec params fields size pos keyNames =
         resList' = if ((&&) `on` List.null) keyResFlowSpecs indexResFlowSpecs
                    then resList
                    else ResourceFlowSpec tabHashResourceSpec ParamIn : resList
-        resSet = Set.fromList resList'
 
         createStmts = entityAllocStmt typeSpec size pos
                         : entityFillAttrsStmts typeSpec attrFieldInfos pos
@@ -1358,7 +1391,7 @@ entityCreateItem vis entityName typeSpec params fields size pos keyNames =
 entityGetItems :: Visibility -> TypeSpec -> Int -> FieldInfo -> Item
 entityGetItems vis etyType etySize (FieldInfo fieldName pos _ fieldType rep offset _) =
     ProcDecl vis (inlineModifiers (GetterProc fieldName fieldType) Det)
-        (ProcProto procName protoParams resSet) [stmt] pos
+        (ProcProto procName protoParams resList) [stmt] pos
     where
         procName = entityGetterName fieldName
         protoParams = [Param entityVariableName etyType ParamIn Ordinary
@@ -1366,7 +1399,7 @@ entityGetItems vis etyType etySize (FieldInfo fieldName pos _ fieldType rep offs
                        Param fieldName fieldType ParamOut Ordinary
                         `maybePlace` pos
                       ]
-        resSet = Set.singleton $ ResourceFlowSpec dbResourceSpec ParamInOut
+        resList = [ResourceFlowSpec dbResourceSpec ParamInOut]
         -- foreign lpvm access(#ety, <offset>, <size>, 0, ?#result, !db)
         stmt = ForeignCall "lpvm" "access" []
                 [varGetTyped entityVariableName etyType `maybePlace` pos,
@@ -1383,7 +1416,7 @@ entitySetItems :: ProcName -> Visibility -> TypeSpec -> Int
                   -> EntityModifierDict -> FieldInfo -> Item
 entitySetItems etyName vis etyType etySize modDict (FieldInfo fieldName pos _ fieldType rep offset _) =
     ProcDecl vis (inlineModifiers (SetterProc fieldName fieldType) Det)
-        (ProcProto procName protoParams resSet)
+        (ProcProto procName protoParams resList')
         (deleteStmts ++ defaultStmt:insertStmts)
         pos
     where
@@ -1402,7 +1435,6 @@ entitySetItems etyName vis etyType etySize modDict (FieldInfo fieldName pos _ fi
         resList' = if List.null indexResFlowSpecs
                    then resList
                    else ResourceFlowSpec tabHashResourceSpec ParamIn : resList
-        resSet = Set.fromList resList'
 
         -- !cuckoo.entity_delete(!index#<key>, get#key, hash, `=`, #ety, get##<key>, set##<key>)
         deleteStmts = cuckooEntityDeleteStmt etyName pos <$> indexKeys
