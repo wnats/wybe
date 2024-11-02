@@ -982,6 +982,22 @@ writeLPVMCall "mutate" _ args pos = do
         (ins,outs,oRefs,iRefs) ->
             shouldnt $ "lpvm mutate with inputs " ++ show ins ++ " and outputs "
                 ++ show outs
+writeLPVMCall "unsafe_mutate" _ args pos = do
+    args' <- partitionArgs "lpvm unsafe_mutate instruction" args
+    case args' of
+        ([struct, offset, val], []) -> do
+            ptrArg <- case offset of
+                ArgInt 0 _ -> return struct
+                _ -> do
+                    (writeArg,readArg) <- freshTempArgs $ argType struct
+                    writeLLVMCall "add" []
+                        [setArgFlow FlowIn struct,offset,writeArg] Nothing
+                    return readArg
+            logLLVM $ "address to store into is held by " ++ show ptrArg
+            llvmStore ptrArg val
+        (ins, outs) ->
+            shouldnt $ "lpvm unsafe_mutate with inputs " ++ show ins ++ " and outputs "
+                ++ show outs
 writeLPVMCall op flags args pos =
     shouldnt $ "unknown lpvm operation:  " ++ op
 
