@@ -34,7 +34,7 @@ import           Resources
 import           Util
 import           Config
 import           Snippets
-import           Blocks              (llvmMapBinop, llvmMapUnop)
+import           LLVM                (llvmMapBinop, llvmMapUnop, BinOpInfo(..))
 import Data.Tuple.HT (mapSnd)
 
 
@@ -867,7 +867,7 @@ expType' (Closure pspec closed) _ = do
         closedTypes <- mapM expType closed
         zipWithM_ (unifyTypes ReasonShouldnt) pTypes' closedTypes
         freeTypes <- mapM ultimateType (List.drop nClosed pTypes')
-        let resful = not $ Set.null res
+        let resful = not $ List.null res
         return $ HigherOrderType
                     (normaliseModifiers
                         $ ProcModifiers detism MayInline
@@ -876,6 +876,7 @@ expType' (Closure pspec closed) _ = do
     else do
         typeError ReasonShouldnt
         return InvalidType
+expType' FailExpr _                   = return AnyType
 expType' (Var name _ _) _             = ultimateVarType name
 expType' (Typed _ typ _) pos          =
     lookupTyped "typed expression" pos typ
@@ -900,6 +901,7 @@ expMode' AnonProc{} = return (ParamIn, True, Nothing)
 expMode' (Var name flow _) = do
     assigned <- get
     return (flow, name `assignedIn` assigned, Nothing)
+expMode' FailExpr = return (ParamIn, True, Nothing)
 expMode' (Typed expr _ _) = expMode' expr
 expMode' expr =
     shouldnt $ "Expression '" ++ show expr ++ "' left after flattening"
@@ -1161,12 +1163,12 @@ typecheckProcDecl' pdef = do
     let outParams = Set.fromList $ paramName <$>
             List.filter (flowsOut . paramFlow) params
     let inResources =
-            Set.map (resourceName . resourceFlowRes)
-            $ Set.filter (flowsIn . resourceFlowFlow) resources
+            List.map (resourceName . resourceFlowRes)
+            $ List.filter (flowsIn . resourceFlowFlow) resources
     let outResources =
-            Set.map (resourceName . resourceFlowRes)
-            $ Set.filter (flowsIn . resourceFlowFlow) resources
-    let inputs = Set.union inParams inResources
+            List.map (resourceName . resourceFlowRes)
+            $ List.filter (flowsIn . resourceFlowFlow) resources
+    let inputs = Set.union inParams $ Set.fromList inResources
     when (vis == Public && any ((==AnyType) . paramType) params)
         $ typeError $ ReasonUndeclared name pos
     ifOK pdef $ do
@@ -1187,14 +1189,14 @@ typecheckProcDecl' pdef = do
                    ++ intercalate ", " (show <$> params)
         mapM_ (addDeclaredType name pos (length params)) $ zip params [1..]
         logTyped $ "Recording resource types: "
-                   ++ intercalate ", " (show <$> Set.toList resources)
+                   ++ intercalate ", " (show <$> resources)
         let (overloaded,okResources) =
               List.partition ((>1) . length . snd)
               $ List.map (mapSnd Set.toList)
               $ Map.toList
                 $ List.foldl (\map spec ->
                                 setMapInsert (resourceName spec) spec map)
-                    Map.empty $ resourceFlowRes <$> Set.toList resources
+                    Map.empty $ resourceFlowRes <$> resources
         lift
          $ mapM_ (errmsg pos . ("Overloaded resources "++) .
                 intercalate ", " . (show <$>) . snd)
@@ -1217,10 +1219,9 @@ typecheckProcDecl' pdef = do
                         typeError $ ReasonUndef name callee $ place pcall
                     _ -> shouldnt "typecheckProcDecl'"
                 ) badCalls
-            ifOK pdef $ do
-                typecheckCalls calls' [] False
-                    $ List.filter (isForeign . content) calls
-                ifOK pdef $ modeCheckProcDecl pdef
+            typecheckCalls calls' [] False
+                $ List.filter (isForeign . content) calls
+            ifOK pdef $ modeCheckProcDecl pdef
 
 
 -- | If no type errors have been recorded, execute the enclosed code; otherwise
@@ -1432,7 +1433,7 @@ firstInfo :: ProcDef -> ProcSpec -> Typed CallInfo
 firstInfo def proc = do
     let proto = procProto def
         params = content <$> procProtoParams proto
-        resources = Set.elems $ procProtoResources proto
+        resources = procProtoResources proto
         realParams = List.filter ((==Ordinary) . paramFlowType) params
         typeFlows = paramTypeFlow <$> realParams
         types = typeFlowType <$> typeFlows
@@ -1491,7 +1492,8 @@ typecheckCalls [] residue False foreigns = do
     case List.filter (List.null . typingErrs) $ snd <$> typings' of
         [typing] -> put typing
         _ -> do
-            typeErrors $ overloadErr <$> residue
+            -- 1st equation handles empty residue case
+            typeError $ overloadErr $ head residue
             typecheckCalls [] [] False foreigns
 typecheckCalls (stmtTyping@(StmtTypings pstmt typs):calls)
         residue chg foreigns = do
@@ -1872,7 +1874,8 @@ initBindingState :: ProcDef -> BindingState
 initBindingState pdef =
     BindingState Det impurity resources emptyUnivSet UniversalSet Set.empty proc
     where impurity = expectedImpurity $ procImpurity pdef
-          resources = Set.map resourceFlowRes
+          resources = Set.fromList 
+                    $ List.map resourceFlowRes
                         (procProtoResources $ procProto pdef)
           proc = procName pdef
 
@@ -2086,11 +2089,13 @@ modeCheckProcDecl pdef = do
     let outParams = Set.fromList $ paramName <$>
             List.filter (flowsOut . paramFlow) params
     let inResources =
-            Set.map (resourceName . resourceFlowRes)
-            $ Set.filter (flowsIn . resourceFlowFlow) resources
+            Set.fromList 
+            $ List.map (resourceName . resourceFlowRes)
+            $ List.filter (flowsIn . resourceFlowFlow) resources
     let outResources =
-            Set.map (resourceName . resourceFlowRes)
-            $ Set.filter (flowsIn . resourceFlowFlow) resources
+            Set.fromList 
+            $ List.map (resourceName . resourceFlowRes)
+            $ List.filter (flowsIn . resourceFlowFlow) resources
     let inputs = Set.union inParams inResources
     logTyped $ "Now mode checking proc " ++ name
     let bound = addBindings inputs $ initBindingState pdef
@@ -2780,12 +2785,11 @@ validateForeignCall "llvm" "move" _ [inRep,outRep] stmt pos
   | otherwise       = typeError (ReasonWrongOutput "move" outRep inRep pos)
 validateForeignCall "llvm" "move" _ argReps stmt pos =
     typeError (ReasonForeignArity "move" (length argReps) 2 pos)
-validateForeignCall "llvm" name flags argReps stmt pos = do
-    let arity = length argReps
+validateForeignCall "llvm" name flags argReps stmt pos =
     case argReps of
         [inRep1,inRep2,outRep] ->
           case Map.lookup name llvmMapBinop of
-             Just (_,fam,outTy) -> do
+             Just (BinOpInfo _ fam _ outTy) -> do
                reportErrorUnless (ReasonWrongFamily name 1 fam pos)
                                  (fam == typeFamily inRep1)
                reportErrorUnless (ReasonWrongFamily name 2 fam pos)
@@ -2794,22 +2798,23 @@ validateForeignCall "llvm" name flags argReps stmt pos = do
                                  (compatibleReps inRep1 inRep2)
              Nothing ->
                if isJust $ Map.lookup name llvmMapUnop
-               then typeError (ReasonForeignArity name arity 2 pos)
+               then typeError (ReasonForeignArity name 3 2 pos)
                else typeError (ReasonBadForeign "llvm" name pos)
         [inRep,outRep] ->
           case Map.lookup name llvmMapUnop of
-             Just (_,famIn,famOut) ->
+             Just (famIn,famOut) ->
                reportErrorUnless (ReasonWrongFamily name 1 famIn pos)
                                  (famIn == typeFamily inRep)
              Nothing ->
                if isJust $ Map.lookup name llvmMapBinop
-               then typeError (ReasonForeignArity name arity 3 pos)
+               then typeError (ReasonForeignArity name 2 3 pos)
                else typeError (ReasonBadForeign "llvm" name pos)
-        _ -> if isJust $ Map.lookup name llvmMapBinop
-             then typeError (ReasonForeignArity name arity 3 pos)
-             else if isJust $ Map.lookup name llvmMapUnop
-                  then typeError (ReasonForeignArity name arity 2 pos)
-                  else typeError (ReasonBadForeign "llvm" name pos)
+        _ -> let arity = length argReps
+             in if isJust $ Map.lookup name llvmMapBinop
+                then typeError (ReasonForeignArity name arity 3 pos)
+                else if isJust $ Map.lookup name llvmMapUnop
+                then typeError (ReasonForeignArity name arity 2 pos)
+                else typeError (ReasonBadForeign "llvm" name pos)
 validateForeignCall "lpvm" name flags argReps stmt pos =
     checkLPVMArgs name flags argReps stmt pos
 validateForeignCall lang name flags argReps stmt pos =
@@ -2817,35 +2822,48 @@ validateForeignCall lang name flags argReps stmt pos =
 
 
 -- | Are two types compatible for use as inputs to a binary LLVM op?
---   Used for type checking LLVM instructions.
+--   Used for type checking LLVM instructions.  LLVM code generation will inject
+--   instructions to convert types or extend or truncate as necessary, so we can
+--   be a bit forgiving here.
 compatibleReps :: TypeRepresentation -> TypeRepresentation -> Bool
-compatibleReps Address      Address      = True
-compatibleReps Address      (Bits bs)    = bs == wordSize
-compatibleReps Address      (Signed bs)  = bs == wordSize
-compatibleReps Address      (Floating _) = False
-compatibleReps Address      (Func _ _)   = True
-compatibleReps (Bits bs)    Address      = bs == wordSize
-compatibleReps (Bits m)     (Bits n)     = m == n
-compatibleReps (Bits m)     (Signed n)   = m == n
-compatibleReps (Bits _)     (Floating _) = False
-compatibleReps (Bits bs)    (Func _ _)   = bs == wordSize
-compatibleReps (Signed bs)  Address      = bs == wordSize
-compatibleReps (Signed m)   (Bits n)     = m == n
-compatibleReps (Signed m)   (Signed n)   = m == n
-compatibleReps (Signed _)   (Floating _) = False
-compatibleReps (Signed bs)  (Func _ _)   = bs == wordSize
-compatibleReps (Floating _) Address      = False
-compatibleReps (Floating _) (Bits _)     = False
-compatibleReps (Floating _) (Signed _)   = False
-compatibleReps (Floating m) (Floating n) = m == n
-compatibleReps (Floating _) (Func _ _)   = False
-compatibleReps (Func _ _)   Address      = True
+compatibleReps Pointer      Pointer      = True
+compatibleReps Pointer      Bits{}       = True
+compatibleReps Pointer      Signed{}     = True
+compatibleReps Pointer      Floating{}   = False
+compatibleReps Pointer      (Func _ _)   = True
+compatibleReps Pointer      CPointer     = True
+compatibleReps Bits{}       Pointer      = True
+compatibleReps Bits{}       Bits{}       = True
+compatibleReps Bits{}       Signed{}     = True
+compatibleReps Bits{}       Floating{}   = False
+compatibleReps Bits{}       Func{}       = False
+compatibleReps Bits{}       CPointer     = True
+compatibleReps Signed{}     Pointer      = True
+compatibleReps Signed{}     Bits{}       = True
+compatibleReps Signed{}     Signed{}     = True
+compatibleReps Signed{}     Floating{}   = False
+compatibleReps Signed{}     Func{}       = False
+compatibleReps Signed{}     CPointer     = True
+compatibleReps Floating{}   Pointer      = False
+compatibleReps Floating{}   Bits{}       = False
+compatibleReps Floating{}   Signed{}     = False
+compatibleReps Floating{}   Floating{}   = True
+compatibleReps Floating{}   Func{}       = False
+compatibleReps Floating{}   CPointer     = False
+compatibleReps Func{}       Pointer      = True
 compatibleReps (Func i1 o1) (Func i2 o2) = sameLength i1 i2 && sameLength o1 o2 &&
                                            and (zipWith compatibleReps i1 i2) &&
                                            and (zipWith compatibleReps o1 o2)
-compatibleReps (Func _ _)   (Bits bs)    = bs == wordSize
-compatibleReps (Func _ _)   (Signed bs)  = bs == wordSize
-compatibleReps (Func _ _)   (Floating _) = False
+compatibleReps Func{}       Bits{}       = False
+compatibleReps Func{}       Signed{}     = False
+compatibleReps Func{}       Floating{}   = False
+compatibleReps Func{}       CPointer     = False
+compatibleReps CPointer     Pointer      = True
+compatibleReps CPointer     Bits{}       = True
+compatibleReps CPointer     Signed{}     = True
+compatibleReps CPointer     Floating{}   = False
+compatibleReps CPointer     Func{}       = True
+compatibleReps CPointer     CPointer     = True
 
 
 -- | Check arg types of an LPVM instruction
@@ -2855,12 +2873,12 @@ checkLPVMArgs "alloc" _ [sz,struct] stmt pos = do
     reportErrorUnless (ReasonForeignArgRep "alloc" 1 sz "integer" pos)
                       (integerTypeRep sz)
     reportErrorUnless (ReasonForeignArgRep "alloc" 2 struct "address" pos)
-                      (struct == Address)
+                      (struct == Pointer)
 checkLPVMArgs "alloc" _ args stmt pos =
     typeError (ReasonForeignArity "alloc" (length args) 2 pos)
 checkLPVMArgs "access" _ [struct,offset,size,startOffset,val] stmt pos = do
     reportErrorUnless (ReasonForeignArgRep "access" 1 struct "address" pos)
-                      (struct == Address)
+                      (struct == Pointer)
     reportErrorUnless (ReasonForeignArgRep "access" 2 offset "integer" pos)
                       (integerTypeRep offset)
     reportErrorUnless (ReasonForeignArgRep "access" 3 size "integer" pos)
@@ -2871,9 +2889,9 @@ checkLPVMArgs "access" _ args stmt pos =
     typeError (ReasonForeignArity "access" (length args) 5 pos)
 checkLPVMArgs "mutate" _ [old,new,offset,destr,sz,start,val] stmt pos = do
     reportErrorUnless (ReasonForeignArgRep "mutate" 1 old "address" pos)
-                      (old == Address)
+                      (old == Pointer)
     reportErrorUnless (ReasonForeignArgRep "mutate" 2 new "address" pos)
-                      (new == Address)
+                      (new == Pointer)
     reportErrorUnless (ReasonForeignArgRep "mutate" 3 offset "integer" pos)
                       (integerTypeRep offset)
     reportErrorUnless (ReasonForeignArgRep "mutate" 4 destr "boolean" pos)
@@ -2886,7 +2904,7 @@ checkLPVMArgs "mutate" _ args stmt pos =
     typeError (ReasonForeignArity "mutate" (length args) 7 pos)
 checkLPVMArgs "unsafe_mutate" _ [addr,offset,val] stmt pos = do
     reportErrorUnless (ReasonForeignArgRep "unsafe_mutate" 1 addr "address" pos)
-                      (addr == Address)
+                      (addr == Pointer)
     reportErrorUnless (ReasonForeignArgRep "unsafe_mutate" 2 offset "integer" pos)
                       (integerTypeRep offset)
 -- XXX do we still need a cast instruction?
@@ -2983,9 +3001,10 @@ checkArgTyped callerName callerPos calleeName callPos (n,arg) =
 checkExpTyped :: ProcName -> OptPos -> String -> Exp ->
                  Compiler ()
 checkExpTyped callerName callerPos msg (Typed expr ty _)
-    | ty /= AnyType = return ()
-checkExpTyped callerName callerPos msg _ =
-    reportUntyped callerName callerPos msg
+    | ty /= AnyType || expr == FailExpr = return ()
+-- checkExpTyped callerName callerPos msg FailExpr = return ()
+checkExpTyped callerName callerPos msg exp =
+    reportUntyped callerName callerPos (msg ++ " " ++ show exp)
 
 
 reportUntyped :: ProcName -> OptPos -> String -> Compiler ()

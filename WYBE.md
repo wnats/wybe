@@ -95,7 +95,9 @@ Hello, World!
 
 Note that `wybemk` is like `make` in that you give it the name of the
 file you want it to build, and it figures out what files it needs
-to compile.
+to compile.  Currently, the Wybe compiler can generate an executable file, an
+object (.o) file, an LLVM assembler (.ll) file, an LLVM bitcode (.bc), and a
+native assembly language (.s) file from a wybe source file.
 
 ### Compiler Options
 
@@ -108,8 +110,8 @@ can be found with the following:
 
 #### Optimisation Options
 
-The `--llvm-opt-level` (`-O`) options specifies the level of optimisation used
-within the LLVM compiler during the compilations stage of a Wybe module. By default, this is set to 3, yet supports the values 0, 1, 2, or 3. More information
+The `--llvm-opt-level` (-O) option specifies the level of optimisation used
+within the LLVM compiler during the compilation stage of a Wybe module. By default, this is set to 3, yet supports the values 0, 1, 2, or 3. More information
 can be found [here](https://llvm.org/docs/CommandGuide/llc.html#id1).
 
 
@@ -269,7 +271,7 @@ More generally, the values of Wybe expressions can be included in strings by
 placing them within parentheses immediately preceded by a dollar sign.  For
 example, if `base` is 2 and `bits` is 63, then
 
-> `"maxint is $(base**bits-1) and minint is $(base**bits)"`
+> `"maxint is $(base**bits-1) and minint is $(-base**bits)"`
 
 denotes the string
 `"maxint is 9223372036854775807 and minint is -9223372036854775808"`
@@ -284,6 +286,31 @@ that `fmt` applied to strings returns the strings as is, without surrounding
 them with quotation marks.  Then
 string concatenation (`,,`) is used to assemble the string from its fixed
 parts and the results of the call(s) to `fmt`.
+
+The `$(`...`)` form can pass extra arguments to the `fmt` function simply by
+following the expression by a comma and the extra arguments to pass.
+There are overloaded versions of `fmt` that additionally take a field width
+argument, right justifying the value to be formatted in a field of (at least)
+that width.
+There are also versions that additionally take a fill character, which will be
+used to fill the field where the value is smaller than the specified field.
+For example,
+```
+!println "-6*7 = $(-6*7,5)"
+!println "-6*7 = $(-6*7,5,'0')"
+!println "-6*7 = $(-6*7,5,'*')"
+```
+will print:
+```
+-6*7 =   -42
+-6*7 = -0042
+-6*7 = **-42
+```
+
+There are overloaded versions of ```fmt``` with higher arities for some specific
+types; see the documentation for the types of interest to see what's available.
+You can interpolate your own types by defining a function `fmt` with your type
+as first argument and returning a `string`.
 
 ## Procedure calls
 
@@ -711,7 +738,7 @@ Wybe also supports an alternative syntax for invoking procedures, functions, or
 constructors that puts the (first) argument first, and the procedure, function,
 or constructor name, with its other arguments, if any, second:
 
-> *arg*`^`*operation*(*other args*)
+> *arg*`^`*operation*`(`*other args*`)`
 
 and in the special case of operations taking only one argument:
 
@@ -2039,7 +2066,7 @@ so be careful to get the call right.
 
 The form of a foreign call is:
 
-> `foreign` *language* *function*(*arg*, *arg*, ...)
+> `foreign` *language* *function*`(`*arg*, *arg*, ...`)`
 
 where *language* is the name of the foreign language the function is written in,
 *function* is the name of the foreign function to call, and the *arg*s are the
@@ -2067,7 +2094,7 @@ Foreign calls may optionally specify *modifiers* to provide extra information
 useful to the Wybe compiler.  If modifiers are to be specified, they are written 
 after the *language* name:
 
-> `foreign` *language* `{`*modifiers*`}` *function*(*arg*, *arg*, ...)
+> `foreign` *language* `{`*modifiers*`}` *function*`(`*arg*, *arg*, ...`)`
 
 where *modifiers* is a comma-separate sequence of identifiers specifying this
 information.  Supported modifiers in foreign calls are:
@@ -2097,6 +2124,35 @@ and the less than test for integers is defined as
 ```
 pub def {test} (x:_ <  y:_) { foreign llvm {test} icmp_slt(x,y) }
 ```
+
+##### Foreign procedure definition short-hand
+
+For convenince, a short-hand syntax is provided to define a Wybe procedure to interface
+with a foriegn procedure. This syntax is as follows:
+
+> `def` `foreign` *language* *function*`(`*param*, *param*, ...`)`
+
+which is equivalent to defining the following:
+
+> `def` *function*`(`*param*, *param*, ...`)` `{` `foreign` *language* *function*`(`*param*, *param*, ...`)` `}`
+
+Note that all parameters must be typed.
+
+Resources can optionally be specified with a `use` clause, that follows the same syntax
+for a regular Wybe procedure definition. Resources are added as additonal arguments to 
+the foreign call after the other arguments, in the order specified in the source code.
+If resources are repeated in the `use` clause, they are added as multiple arguments in 
+the generated foreign call.
+
+Modifiers can also optionally be specified, with the syntax being identical to a Wybe 
+procedure definition, and are added to the foreign procedure call. 
+In addition, inlining (`inline`, `noinline`) can be specified for the for a 
+foreign procedure, but only inline/don't inline the generated Wybe procedure, and don't 
+apply to the generated foreign call.
+
+With both resources and modifiers, this would be as follows:
+
+> `def` `foreign` *language* `{` *modifiers* `}` *function*`(`*param*, *param*, ...`)` `use` *resources*
 
 
 #### Using LLVM instructions
@@ -2189,18 +2245,46 @@ Floating point multiplication
 Floating point division
 - `foreign llvm frem(`arg1:float, arg2:float`)`:float
 Floating point remainder
-- `foreign llvm fcmp_eq(`arg1:float, arg2:float`)`:bool
+
+
+##### Floating point comparisons
+
+Floating point comparisons are either *ordered* or *unordered*, the former
+returning false if either comparand is not a number (NaN), while the latter sort
+return true in that case.
+
+- `foreign llvm fcmp_false(`arg1:float, arg2:float`)`:bool
+Always returns false with no comparison
+- `foreign llvm fcmp_oeq(`arg1:float, arg2:float`)`:bool
 Floating point equality
-- `foreign llvm fcmp_ne(`arg1:float, arg2:float`)`:bool
+- `foreign llvm fcmp_ogt(`arg1:float, arg2:float`)`:bool
+Floating point strictly greater
+- `foreign llvm fcmp_oge(`arg1:float, arg2:float`)`:bool
+Floating point greater or equal
+- `foreign llvm fcmp_olt(`arg1:float, arg2:float`)`:bool
+Floating point strictly less
+- `foreign llvm fcmp_ole(`arg1:float, arg2:float`)`:bool
+Floating point less or equal
+- `foreign llvm fcmp_one(`arg1:float, arg2:float`)`:bool
 Floating point disequality
-- `foreign llvm fcmp_slt(`arg1:float, arg2:float`)`:bool
-Floating point (signed) strictly less
-- `foreign llvm fcmp_sle(`arg1:float, arg2:float`)`:bool
-Floating point (signed) less or equal
-- `foreign llvm fcmp_sgt(`arg1:float, arg2:float`)`:bool
-Floating point (signed) strictly greater
-- `foreign llvm fcmp_sge(`arg1:float, arg2:float`)`:bool
-Floating point (signed) greater or equal
+- `foreign llvm fcmp_ord(`arg1:float, arg2:float`)`:bool
+Floating point ordered (neither is a NaN)
+- `foreign llvm fcmp_ueq(`arg1:float, arg2:float`)`:bool
+Floating point unordered or equal
+- `foreign llvm fcmp_ugt(`arg1:float, arg2:float`)`:bool
+Floating point unordered or strictly greater
+- `foreign llvm fcmp_uge(`arg1:float, arg2:float`)`:bool
+Floating point unordered or greater or equal
+- `foreign llvm fcmp_ult(`arg1:float, arg2:float`)`:bool
+Floating point unordered or strictly less
+- `foreign llvm fcmp_ule(`arg1:float, arg2:float`)`:bool
+Floating point unordered or less or equal
+- `foreign llvm fcmp_une(`arg1:float, arg2:float`)`:bool
+Floating point unordered or not equal
+- `foreign llvm fcmp_uno(`arg1:float, arg2:float`)`:bool
+Floating point unordered (either is a NaN)
+- `foreign llvm fcmp_true(`arg1:float, arg2:float`)`:bool
+Always returns true with no comparison
 
 #####  <a name="conversion"></a>Integer/floating point conversion
 
@@ -2227,17 +2311,20 @@ declaration has the form:
 
 where *rep* has one of these forms:
 
-- `address`
-the type is a machine address, similar to the `void *` type in C.
-- *n* `bit` *numbertype*
-a primitive number type comprising *n* bits, where *n* is any non-negative
-integer and *numbertype* is one of:
-  - `signed`
-  a signed integer type
-  - `unsigned`
-  an unsigned integer type
-  - `float`
-  a floating point number; *n* must be 16, 32, 64, or 128.
+- `pointer`
+ the type is the address of a Wybe data structure.  Foreign code should not
+treat this as an ordinary pointer.
+- `opaque`
+the type is a machine address, similar to the `void *` type in C.  Wybe treats such values as opaque.
+- *n* `bit signed`
+a signed primitive number type comprising *n* bits, where *n* is any positive
+integer.  Represents integers between -2<sup>*n*-1</sup> and 2<sup>*n*-1</sup>-1 inclusive.
+- *n* `bit unsigned`
+an unsigned primitive number type comprising *n* bits, where *n* is any non-negative
+integer. Represents integers between 0 and 2<sup>*n*</sup>-1 inclusive.
+- *n* `bit float`
+a floating point number type comprising *n* bits, where *n* is one of 16, 32,
+64, or 128.  
 
 Like a `constructor` declaration, a `representation` declaration makes the
 enclosing module into type.  Also like a `constructor` declaration, a submodule
